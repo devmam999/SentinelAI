@@ -1,0 +1,69 @@
+@import 'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap';
+@import 'tailwindcss';
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains);
+}
+
+:root {
+  --background: #060a06;
+  --foreground: #e2f0e2;
+  --card: #0d140d;
+  --card-foreground: #e2f0e2;
+  --primary: #00d68f;
+  --primary-foreground: #060a06;
+  --secondary: #0f1f0f;
+  --secondary-foreground: #a3c9a3;
+  --muted: #0d140d;
+  --muted-foreground: #5a7a5a;
+  --accent: #00ff88;
+  --accent-foreground: #060a06;
+  --border: #1a2e1a;
+  --ring: #00d68f;
+  --radius: 4px;
+  --font-inter: 'Inter', system-ui, sans-serif;
+  --font-jetbrains: 'JetBrains Mono', 'Courier New', monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-inter);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::-webkit-scrollbar {
+  width: 0px;
+}
+
+::selection {
+  background: #00d68f33;
+  color: #00ff88;
+}
