@@ -155,7 +155,7 @@ export default function Dashboard() {
       </header>
 
       {/* Content */}
-      <main style={{ maxWidth: 780, margin: '0 auto', padding: '48px 24px 80px' }}>
+      <main className="animate-fade-down" style={{ maxWidth: 780, margin: '0 auto', padding: '48px 24px 80px' }}>
         {/* Title row */}
         <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
           <h1

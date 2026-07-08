@@ -23,6 +23,37 @@
   --font-mono: var(--font-jetbrains);
 }
 
+@theme {
+  /* Entrance animations used on route/page changes (sign up, log in, log out).
+     `backwards` fill applies the start frame before the animation runs (no flash)
+     but leaves no lingering transform afterward, so fixed/sticky headers keep
+     working normally once the animation finishes. */
+  --animate-fade-down: fade-down 0.55s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  --animate-fade-up: fade-up 0.55s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+
+  @keyframes fade-down {
+    from {
+      opacity: 0;
+      transform: translateY(-18px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(18px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
 :root {
   --background: #060a06;
   --foreground: #e2f0e2;

@@ -42,7 +42,7 @@ export default function AuthLayout({
         }}
       />
 
-      <div className="relative z-10 w-full" style={{ maxWidth: 400 }}>
+      <div className="animate-fade-down relative z-10 w-full" style={{ maxWidth: 400 }}>
         {/* Logo */}
         <Link to="/" className="flex items-center justify-center gap-2.5" style={{ textDecoration: 'none', marginBottom: 28 }}>
           <div
