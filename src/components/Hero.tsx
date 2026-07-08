@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 const terminalLines = [
   { delay: 0,    text: '$ sentinel scan --env production', type: 'cmd' },
@@ -12,6 +13,7 @@ const terminalLines = [
 
 export default function Hero() {
   const [visibleLines, setVisibleLines] = useState<number>(0)
+  const navigate = useNavigate()
 
   useEffect(() => {
     const timers = terminalLines.map((line, i) =>
@@ -132,6 +134,7 @@ export default function Hero() {
         {/* CTAs */}
         <div className="flex flex-col sm:flex-row gap-3 mb-16">
           <button
+            onClick={() => navigate('/signup')}
             style={{
               fontFamily: 'var(--font-inter)',
               fontWeight: 700,

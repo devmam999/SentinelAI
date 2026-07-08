@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 const navItems = [
   { label: 'Features', target: 'features' },
@@ -7,6 +8,7 @@ const navItems = [
 
 export default function Navbar() {
   const [mobileOpen, setMobileOpen] = useState(false)
+  const navigate = useNavigate()
 
   const scrollToSection = (target: string) => {
     document.getElementById(target)?.scrollIntoView({ behavior: 'smooth' })
@@ -80,6 +82,7 @@ export default function Navbar() {
       {/* Actions */}
       <div className="hidden md:flex items-center gap-3">
         <button
+          onClick={() => navigate('/login')}
           style={{
             fontFamily: 'var(--font-inter)',
             fontSize: '0.875rem',
@@ -98,6 +101,7 @@ export default function Navbar() {
           Log in
         </button>
         <button
+          onClick={() => navigate('/signup')}
           style={{
             fontFamily: 'var(--font-inter)',
             fontSize: '0.875rem',
@@ -170,6 +174,10 @@ export default function Navbar() {
           ))}
           <div className="flex flex-col gap-3 pt-2">
             <button
+              onClick={() => {
+                setMobileOpen(false)
+                navigate('/login')
+              }}
               style={{
                 fontFamily: 'var(--font-inter)',
                 fontSize: '0.95rem',
@@ -185,6 +193,10 @@ export default function Navbar() {
               Log in
             </button>
             <button
+              onClick={() => {
+                setMobileOpen(false)
+                navigate('/signup')
+              }}
               style={{
                 fontFamily: 'var(--font-inter)',
                 fontSize: '0.95rem',
