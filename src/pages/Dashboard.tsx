@@ -1,78 +1,51 @@
-import { useAuth } from '../context/AuthContext'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useAuth } from '../context/AuthContext'
+import { supabase, isSupabaseConfigured } from '../lib/supabase'
 
-type ProjectItem = {
-  label: string
-  description: string
-  icon: React.ReactNode
-  accent?: boolean
+type Project = {
+  id: string
+  name: string
+  github_repo: string | null
+  slack_webhook: string | null
+  runbooks: string | null
+  created_at: string
 }
-
-const projectItems: ProjectItem[] = [
-  {
-    label: 'Add Project',
-    description: 'Create a new service for Sentinel to watch',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-        <path d="M8 3.5v9M3.5 8h9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      </svg>
-    ),
-  },
-  {
-    label: 'GitHub Repository',
-    description: 'Connect the repo to trace the likely bad commit',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-        <path
-          d="M8 1.5a6.5 6.5 0 00-2.05 12.67c.32.06.44-.14.44-.31v-1.2c-1.8.39-2.19-.77-2.19-.77-.29-.75-.72-.95-.72-.95-.59-.4.04-.4.04-.4.65.05 1 .67 1 .67.58 1 1.52.71 1.89.54.06-.42.23-.71.41-.87-1.44-.16-2.95-.72-2.95-3.2 0-.71.25-1.28.67-1.74-.07-.16-.29-.82.06-1.72 0 0 .55-.17 1.8.67a6.2 6.2 0 013.28 0c1.25-.84 1.8-.67 1.8-.67.35.9.13 1.56.06 1.72.42.46.67 1.03.67 1.74 0 2.49-1.51 3.04-2.96 3.2.24.2.44.59.44 1.2v1.78c0 .17.12.38.45.31A6.5 6.5 0 008 1.5z"
-          stroke="currentColor"
-          strokeWidth="1.1"
-          strokeLinejoin="round"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Slack Webhook',
-    description: 'Choose the channel for incident briefs',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-        <path
-          d="M3 6a1.5 1.5 0 013 0v2a1.5 1.5 0 01-3 0V6zM10 8a1.5 1.5 0 013 0v2a1.5 1.5 0 01-3 0V8zM6 3a1.5 1.5 0 010 3H4a1.5 1.5 0 010-3h2zM8 10a1.5 1.5 0 010 3v-1.5"
-          stroke="currentColor"
-          strokeWidth="1.2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    ),
-  },
-  {
-    label: 'Runbooks',
-    description: 'Upload the fixes Sentinel should reach for',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-        <path d="M3.5 2.5h6l3 3v8h-9z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-        <path d="M6 8h4M6 10.5h4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-      </svg>
-    ),
-  },
-  {
-    label: 'Trigger Test Incident',
-    description: 'Fire a mock alert and watch Sentinel respond',
-    accent: true,
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-        <path d="M8 2v6M8 11v.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-        <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.2" />
-      </svg>
-    ),
-  },
-]
 
 export default function Dashboard() {
   const { user, signOut } = useAuth()
   const navigate = useNavigate()
+
+  const [projects, setProjects] = useState<Project[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+
+    async function loadProjects() {
+      if (!isSupabaseConfigured) {
+        setError('Supabase is not configured yet. Add your credentials to .env.local and restart the dev server.')
+        setLoading(false)
+        return
+      }
+
+      const { data, error } = await supabase
+        .from('projects')
+        .select('*')
+        .order('created_at', { ascending: false })
+
+      if (!active) return
+      if (error) setError(error.message)
+      else setProjects(data ?? [])
+      setLoading(false)
+    }
+
+    loadProjects()
+    return () => {
+      active = false
+    }
+  }, [])
 
   const handleSignOut = async () => {
     // Navigate off the protected route BEFORE clearing the session. Otherwise
@@ -80,6 +53,17 @@ export default function Dashboard() {
     // ProtectedRoute redirects to /login before this navigate runs.
     navigate('/', { replace: true })
     await signOut()
+  }
+
+  const handleDelete = async (project: Project) => {
+    if (!window.confirm(`Delete "${project.name}"? This can't be undone.`)) return
+
+    const { error } = await supabase.from('projects').delete().eq('id', project.id)
+    if (error) {
+      setError(error.message)
+      return
+    }
+    setProjects((current) => current.filter((p) => p.id !== project.id))
   }
 
   return (
@@ -156,23 +140,18 @@ export default function Dashboard() {
 
       {/* Content */}
       <main className="animate-fade-down" style={{ maxWidth: 780, margin: '0 auto', padding: '48px 24px 80px' }}>
-        {/* Title row */}
-        <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
-          <h1
-            style={{
-              fontFamily: 'var(--font-inter)',
-              fontWeight: 800,
-              fontSize: 'clamp(1.6rem, 4vw, 2.1rem)',
-              letterSpacing: '-0.03em',
-            }}
-          >
-            Dashboard
-          </h1>
-          <svg width="22" height="22" viewBox="0 0 22 22" fill="none" style={{ color: 'var(--muted-foreground)' }}>
-            <rect x="7" y="7" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.5" />
-            <path d="M4 13V6a2 2 0 012-2h7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-          </svg>
-        </div>
+        {/* Title */}
+        <h1
+          style={{
+            fontFamily: 'var(--font-inter)',
+            fontWeight: 800,
+            fontSize: 'clamp(1.6rem, 4vw, 2.1rem)',
+            letterSpacing: '-0.03em',
+            marginBottom: 8,
+          }}
+        >
+          Dashboard
+        </h1>
         <p
           style={{
             fontFamily: 'var(--font-inter)',
@@ -181,12 +160,11 @@ export default function Dashboard() {
             marginBottom: 40,
           }}
         >
-          Welcome back{user?.email ? `, ${user.email.split('@')[0]}` : ''}. Wire up a project so Sentinel can start
-          watching.
+          Welcome back{user?.email ? `, ${user.email.split('@')[0]}` : ''}. Manage the projects Sentinel is watching.
         </p>
 
-        {/* Projects section */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18 }}>
+        {/* Projects section header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 }}>
           <span
             style={{
               fontFamily: 'var(--font-jetbrains)',
@@ -200,128 +178,332 @@ export default function Dashboard() {
             Projects
           </span>
           <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+          <button
+            onClick={() => navigate('/add-project')}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 7,
+              fontFamily: 'var(--font-inter)',
+              fontWeight: 700,
+              fontSize: '0.85rem',
+              color: 'var(--primary-foreground)',
+              background: 'var(--primary)',
+              border: 'none',
+              cursor: 'pointer',
+              padding: '9px 16px',
+              borderRadius: 5,
+              transition: 'opacity 0.15s',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.85')}
+            onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+              <path d="M8 3.5v9M3.5 8h9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+            New Project
+          </button>
         </div>
 
-        {/* Tree */}
-        <div>
-          {projectItems.map((item, i) => (
-            <ProjectRow key={item.label} item={item} isLast={i === projectItems.length - 1} />
-          ))}
-        </div>
+        {/* Body: loading / error / empty / list */}
+        {loading ? (
+          <EmptyLike text="Loading projects…" />
+        ) : error ? (
+          <div
+            style={{
+              fontFamily: 'var(--font-inter)',
+              fontSize: '0.88rem',
+              lineHeight: 1.5,
+              color: '#ff8a8a',
+              background: 'rgba(255,95,95,0.08)',
+              border: '1px solid rgba(255,95,95,0.25)',
+              borderRadius: 8,
+              padding: '16px 18px',
+            }}
+          >
+            {error}
+          </div>
+        ) : projects.length === 0 ? (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              textAlign: 'center',
+              gap: 14,
+              background: 'var(--card)',
+              border: '1px dashed var(--border)',
+              borderRadius: 10,
+              padding: '56px 24px',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: 44,
+                height: 44,
+                borderRadius: 10,
+                color: 'var(--muted-foreground)',
+                background: 'var(--muted)',
+                border: '1px solid var(--border)',
+              }}
+            >
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                <rect x="3" y="4.5" width="16" height="13" rx="2" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M3 8h16" stroke="currentColor" strokeWidth="1.5" />
+              </svg>
+            </div>
+            <div
+              style={{
+                fontFamily: 'var(--font-inter)',
+                fontWeight: 700,
+                fontSize: '1rem',
+                color: 'var(--foreground)',
+              }}
+            >
+              No projects here yet
+            </div>
+            <div
+              style={{
+                fontFamily: 'var(--font-inter)',
+                fontSize: '0.88rem',
+                color: 'var(--muted-foreground)',
+                maxWidth: 320,
+              }}
+            >
+              Create your first project to connect a repo, Slack, and runbooks for Sentinel to watch.
+            </div>
+            <button
+              onClick={() => navigate('/add-project')}
+              style={{
+                fontFamily: 'var(--font-inter)',
+                fontWeight: 700,
+                fontSize: '0.875rem',
+                color: 'var(--primary-foreground)',
+                background: 'var(--primary)',
+                border: 'none',
+                cursor: 'pointer',
+                padding: '10px 20px',
+                borderRadius: 5,
+                marginTop: 4,
+                transition: 'opacity 0.15s',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.85')}
+              onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
+            >
+              New Project
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {projects.map((project) => (
+              <ProjectCard
+                key={project.id}
+                project={project}
+                onOpen={() => navigate(`/project/${project.id}`)}
+                onEdit={() => navigate(`/edit-project/${project.id}`)}
+                onDelete={() => handleDelete(project)}
+              />
+            ))}
+          </div>
+        )}
       </main>
     </div>
   )
 }
 
-function ProjectRow({ item, isLast }: { item: ProjectItem; isLast: boolean }) {
-  const accentColor = item.accent ? 'var(--accent)' : 'var(--primary)'
+function EmptyLike({ text }: { text: string }) {
+  return (
+    <div
+      style={{
+        fontFamily: 'var(--font-jetbrains)',
+        fontSize: '0.85rem',
+        color: 'var(--muted-foreground)',
+        border: '1px solid var(--border)',
+        borderRadius: 8,
+        padding: '28px 20px',
+        textAlign: 'center',
+      }}
+    >
+      {text}
+    </div>
+  )
+}
+
+function ProjectCard({
+  project,
+  onOpen,
+  onEdit,
+  onDelete,
+}: {
+  project: Project
+  onOpen: () => void
+  onEdit: () => void
+  onDelete: () => void
+}) {
+  const [hovered, setHovered] = useState(false)
+
+  const integrations = [
+    { label: 'GitHub', value: project.github_repo },
+    { label: 'Slack', value: project.slack_webhook },
+    { label: 'Runbooks', value: project.runbooks },
+  ]
+
+  // Keep action-button clicks from also triggering the card's open navigation.
+  const stop = (handler: () => void) => (e: React.MouseEvent) => {
+    e.stopPropagation()
+    handler()
+  }
 
   return (
-    <div style={{ display: 'flex', alignItems: 'stretch', gap: 0 }}>
-      {/* Tree connector */}
-      <div
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onOpen()
+        }
+      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
+        background: hovered ? '#0d1a0d' : 'var(--card)',
+        border: `1px solid ${hovered ? 'var(--primary)' : 'var(--border)'}`,
+        borderRadius: 8,
+        padding: '16px 18px',
+        cursor: 'pointer',
+        transition: 'background 0.15s, border-color 0.15s',
+      }}
+    >
+      <span
         style={{
-          width: 28,
-          flexShrink: 0,
-          position: 'relative',
-          fontFamily: 'var(--font-jetbrains)',
-          color: 'var(--muted-foreground)',
-        }}
-      >
-        {/* vertical line */}
-        <div
-          style={{
-            position: 'absolute',
-            left: 6,
-            top: 0,
-            bottom: isLast ? '50%' : 0,
-            width: 1,
-            background: 'var(--border)',
-          }}
-        />
-        {/* horizontal line */}
-        <div
-          style={{
-            position: 'absolute',
-            left: 6,
-            top: '50%',
-            width: 16,
-            height: 1,
-            background: 'var(--border)',
-          }}
-        />
-      </div>
-
-      {/* Card */}
-      <button
-        className="group"
-        style={{
-          flex: 1,
           display: 'flex',
           alignItems: 'center',
-          gap: 14,
-          textAlign: 'left',
-          background: 'var(--card)',
-          border: '1px solid var(--border)',
-          borderRadius: 6,
-          padding: '14px 16px',
-          margin: '6px 0',
-          cursor: 'pointer',
-          transition: 'border-color 0.15s, background 0.15s',
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.borderColor = accentColor
-          e.currentTarget.style.background = '#0d1a0d'
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.borderColor = 'var(--border)'
-          e.currentTarget.style.background = 'var(--card)'
+          justifyContent: 'center',
+          width: 36,
+          height: 36,
+          flexShrink: 0,
+          borderRadius: 7,
+          color: 'var(--primary)',
+          background: 'rgba(0,214,143,0.09)',
+          border: '1px solid rgba(0,214,143,0.2)',
         }}
       >
-        <span
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none">
+          <path d="M8 1L14 4.5V11.5L8 15L2 11.5V4.5L8 1Z" stroke="currentColor" strokeWidth="1.4" fill="none" />
+          <circle cx="8" cy="8" r="2" fill="currentColor" />
+        </svg>
+      </span>
+
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
           style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 34,
-            height: 34,
-            flexShrink: 0,
-            borderRadius: 6,
-            color: accentColor,
-            background: item.accent ? 'rgba(0,255,136,0.1)' : 'rgba(0,214,143,0.09)',
-            border: `1px solid ${item.accent ? 'rgba(0,255,136,0.25)' : 'rgba(0,214,143,0.2)'}`,
+            fontFamily: 'var(--font-inter)',
+            fontWeight: 600,
+            fontSize: '0.95rem',
+            color: 'var(--foreground)',
+            marginBottom: 6,
           }}
         >
-          {item.icon}
+          {project.name}
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {integrations.map((integration) => {
+            const connected = Boolean(integration.value)
+            return (
+              <span
+                key={integration.label}
+                style={{
+                  fontFamily: 'var(--font-jetbrains)',
+                  fontSize: '0.66rem',
+                  fontWeight: 600,
+                  letterSpacing: '0.04em',
+                  color: connected ? 'var(--primary)' : 'var(--muted-foreground)',
+                  background: connected ? 'rgba(0,214,143,0.09)' : 'var(--muted)',
+                  border: `1px solid ${connected ? 'rgba(0,214,143,0.22)' : 'var(--border)'}`,
+                  borderRadius: 4,
+                  padding: '2px 7px',
+                }}
+              >
+                {integration.label}
+                {connected ? ' ✓' : ' —'}
+              </span>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Actions */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+        <IconButton label="Edit project" onClick={stop(onEdit)}>
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M11 2.5l2.5 2.5L6 12.5l-3 .5.5-3L11 2.5z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+          </svg>
+        </IconButton>
+        <IconButton label="Delete project" danger onClick={stop(onDelete)}>
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M3 4.5h10M6.5 4V2.5h3V4M4.5 4.5l.5 8h6l.5-8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </IconButton>
+        <span style={{ display: 'flex', alignItems: 'center', color: 'var(--muted-foreground)', paddingLeft: 2 }}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
         </span>
-        <span style={{ flex: 1 }}>
-          <span
-            style={{
-              display: 'block',
-              fontFamily: 'var(--font-inter)',
-              fontWeight: 600,
-              fontSize: '0.925rem',
-              color: 'var(--foreground)',
-            }}
-          >
-            {item.label}
-          </span>
-          <span
-            style={{
-              display: 'block',
-              fontFamily: 'var(--font-inter)',
-              fontSize: '0.8rem',
-              color: 'var(--muted-foreground)',
-              marginTop: 2,
-            }}
-          >
-            {item.description}
-          </span>
-        </span>
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ color: 'var(--muted-foreground)', flexShrink: 0 }}>
-          <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
+      </div>
     </div>
+  )
+}
+
+function IconButton({
+  children,
+  label,
+  onClick,
+  danger,
+}: {
+  children: React.ReactNode
+  label: string
+  onClick: (e: React.MouseEvent) => void
+  danger?: boolean
+}) {
+  const hoverColor = danger ? '#ff5f5f' : 'var(--primary)'
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 30,
+        height: 30,
+        color: 'var(--muted-foreground)',
+        background: 'transparent',
+        border: '1px solid var(--border)',
+        borderRadius: 5,
+        cursor: 'pointer',
+        transition: 'color 0.15s, border-color 0.15s',
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.color = hoverColor
+        e.currentTarget.style.borderColor = hoverColor
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.color = 'var(--muted-foreground)'
+        e.currentTarget.style.borderColor = 'var(--border)'
+      }}
+    >
+      {children}
+    </button>
   )
 }

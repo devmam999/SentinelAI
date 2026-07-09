@@ -3,6 +3,8 @@ import Landing from './pages/Landing'
 import Login from './pages/Login'
 import SignUp from './pages/SignUp'
 import Dashboard from './pages/Dashboard'
+import AddProject from './pages/AddProject'
+import ProjectDetail from './pages/ProjectDetail'
 import ProtectedRoute from './components/ProtectedRoute'
 
 export default function App() {
@@ -16,6 +18,30 @@ export default function App() {
         element={
           <ProtectedRoute>
             <Dashboard />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/add-project"
+        element={
+          <ProtectedRoute>
+            <AddProject />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/edit-project/:id"
+        element={
+          <ProtectedRoute>
+            <AddProject />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/project/:id"
+        element={
+          <ProtectedRoute>
+            <ProjectDetail />
           </ProtectedRoute>
         }
       />
