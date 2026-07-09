@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
+import { analyzeIncident, indexRunbook, type IncidentAnalysis } from '../lib/api'
 
 type Project = {
   id: string
@@ -15,16 +16,9 @@ type Incident = {
   id: number
   title: string
   status: 'active' | 'resolved'
+  analysis?: IncidentAnalysis
+  slackPosted?: boolean
 }
-
-const INCIDENT_TITLES = [
-  'High API Latency',
-  'Database Timeout',
-  'Authentication Failure',
-  'Elevated Error Rate',
-  'Redis Connection Drop',
-  'Memory Pressure',
-]
 
 function parseRunbooks(runbooks: string | null): string[] {
   if (!runbooks) return []
@@ -46,9 +40,11 @@ export default function ProjectDetail() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  // Incidents are simulated locally (Demo Mode) — there's no incident backend yet.
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [nextId, setNextId] = useState(101)
+  const [alertText, setAlertText] = useState('')
+  const [analyzing, setAnalyzing] = useState(false)
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!id) return
@@ -77,10 +73,65 @@ export default function ProjectDetail() {
   const recentIncidents = incidents.filter((i) => i.status === 'resolved')
   const isHealthy = activeIncidents.length === 0
 
-  const simulateIncident = () => {
-    const title = INCIDENT_TITLES[Math.floor(Math.random() * INCIDENT_TITLES.length)]
-    setIncidents((current) => [{ id: nextId, title, status: 'active' }, ...current])
-    setNextId((n) => n + 1)
+  // Best-effort: push this project's markdown runbooks into the backend so
+  // Sentinel's ChromaDB semantic search has content to match. PDFs are skipped
+  // (they need server-side parsing). Individual failures are ignored.
+  const indexRunbooksBestEffort = async () => {
+    if (!project) return
+    const markdown = parseRunbooks(project.runbooks).filter((p) => /\.md$/i.test(p))
+    await Promise.all(
+      markdown.map(async (path) => {
+        try {
+          const { data } = await supabase.storage.from('runbooks').createSignedUrl(path, 60)
+          if (!data?.signedUrl) return
+          const content = await fetch(data.signedUrl).then((r) => r.text())
+          await indexRunbook({
+            id: `${project.id}/${path}`,
+            title: baseName(path),
+            content,
+            metadata: { project_id: project.id },
+          })
+        } catch {
+          /* best-effort */
+        }
+      }),
+    )
+  }
+
+  const triggerAnalysis = async () => {
+    if (!project) return
+    if (!project.github_repo) {
+      setAnalyzeError('Add a GitHub repository to this project before analyzing.')
+      return
+    }
+    setAnalyzing(true)
+    setAnalyzeError(null)
+    try {
+      await indexRunbooksBestEffort()
+      const result = await analyzeIncident({
+        github_repo: project.github_repo,
+        description: alertText.trim() || 'A production alert fired.',
+        slack_webhook_url: project.slack_webhook,
+        post_to_slack: Boolean(project.slack_webhook),
+      })
+      const { analysis } = result
+      setIncidents((current) => [
+        {
+          id: nextId,
+          title: analysis.likely_cause || analysis.most_relevant_commit || 'Production incident',
+          status: 'active',
+          analysis,
+          slackPosted: result.slack_posted,
+        },
+        ...current,
+      ])
+      setNextId((n) => n + 1)
+      setAlertText('')
+    } catch (err) {
+      setAnalyzeError(err instanceof Error ? err.message : 'Analysis failed. Is the backend running?')
+    } finally {
+      setAnalyzing(false)
+    }
   }
 
   const resolveIncident = (incidentId: number) => {
@@ -197,48 +248,68 @@ export default function ProjectDetail() {
                 value={runbookFiles.length > 0 ? `${runbookFiles.length} Uploaded` : 'None uploaded'}
                 good={runbookFiles.length > 0}
               />
-              <StatCard label="Alert Source" value="Demo Mode Enabled" good />
+              <StatCard label="Alert Source" value="AI Analysis" good />
             </div>
 
             {/* Current incidents */}
             <SectionHeading>Current Incidents</SectionHeading>
-            <div style={{ marginBottom: 14 }}>
+            <div style={{ marginBottom: 16 }}>
               {activeIncidents.length === 0 ? (
                 <div style={emptyRowStyle}>No active incidents.</div>
               ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                   {activeIncidents.map((incident) => (
-                    <div key={incident.id} style={incidentRowStyle}>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <span style={monoMuted}>#{incident.id}</span>
-                        <span style={{ fontFamily: 'var(--font-inter)', fontSize: '0.9rem', color: 'var(--foreground)' }}>
-                          {incident.title}
-                        </span>
-                      </span>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                        <StatusTag kind="active">Active</StatusTag>
-                        <button
-                          onClick={() => resolveIncident(incident.id)}
-                          style={resolveButtonStyle}
-                          onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--primary)')}
-                          onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
-                        >
-                          Resolve
-                        </button>
-                      </span>
-                    </div>
+                    <ActiveIncidentCard
+                      key={incident.id}
+                      incident={incident}
+                      onResolve={() => resolveIncident(incident.id)}
+                    />
                   ))}
                 </div>
               )}
             </div>
-            <button
-              onClick={simulateIncident}
-              style={simulateButtonStyle}
-              onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.85')}
-              onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
-            >
-              Simulate Incident
-            </button>
+
+            {analyzeError && <div style={{ ...errorStyle, marginBottom: 12 }}>{analyzeError}</div>}
+
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
+              <input
+                type="text"
+                value={alertText}
+                onChange={(e) => setAlertText(e.target.value)}
+                placeholder="Describe the alert (optional) — e.g. 5xx spike on API gateway"
+                disabled={analyzing}
+                style={{
+                  flex: 1,
+                  minWidth: 240,
+                  fontFamily: 'var(--font-inter)',
+                  fontSize: '0.875rem',
+                  color: 'var(--foreground)',
+                  background: 'var(--background)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 5,
+                  padding: '10px 12px',
+                  outline: 'none',
+                }}
+                onFocus={(e) => (e.currentTarget.style.borderColor = 'var(--primary)')}
+                onBlur={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !analyzing) triggerAnalysis()
+                }}
+              />
+              <button
+                onClick={triggerAnalysis}
+                disabled={analyzing}
+                style={{
+                  ...simulateButtonStyle,
+                  opacity: analyzing ? 0.6 : 1,
+                  cursor: analyzing ? 'default' : 'pointer',
+                }}
+                onMouseEnter={(e) => !analyzing && (e.currentTarget.style.opacity = '0.85')}
+                onMouseLeave={(e) => !analyzing && (e.currentTarget.style.opacity = '1')}
+              >
+                {analyzing ? 'Analyzing…' : 'Analyze Incident'}
+              </button>
+            </div>
 
             {/* Recent incidents */}
             <SectionHeading style={{ marginTop: 40 }}>Recent Incidents</SectionHeading>
@@ -387,6 +458,101 @@ function StatCard({ label, value, good }: { label: string; value: string; good: 
           fontSize: '0.9rem',
           fontWeight: 600,
           color: good ? 'var(--primary)' : 'var(--muted-foreground)',
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  )
+}
+
+function ActiveIncidentCard({ incident, onResolve }: { incident: Incident; onResolve: () => void }) {
+  const a = incident.analysis
+  return (
+    <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10, padding: '16px 18px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={monoMuted}>#{incident.id}</span>
+          <span style={{ fontFamily: 'var(--font-inter)', fontSize: '0.95rem', fontWeight: 600, color: 'var(--foreground)' }}>
+            {incident.title}
+          </span>
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <StatusTag kind="active">Active</StatusTag>
+          <button
+            onClick={onResolve}
+            style={resolveButtonStyle}
+            onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--primary)')}
+            onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
+          >
+            Resolve
+          </button>
+        </span>
+      </div>
+
+      {a && (
+        <div style={{ marginTop: 14, display: 'grid', gap: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+            <AnalysisField label="Likely Cause" value={a.likely_cause} accent />
+            <AnalysisField label="Confidence" value={`${a.confidence}%`} accent />
+          </div>
+          <AnalysisField label="Most Relevant Commit" value={a.most_relevant_commit} mono />
+          <AnalysisField label="Affected Services" value={a.affected_services.join(', ') || '—'} />
+          <AnalysisField label="Suggested Runbook" value={a.suggested_runbook} accent />
+          <div>
+            <FieldLabel>Next Steps</FieldLabel>
+            {a.next_steps.length > 0 ? (
+              <ol style={{ margin: '6px 0 0', paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {a.next_steps.map((step, i) => (
+                  <li key={i} style={{ fontFamily: 'var(--font-inter)', fontSize: '0.875rem', color: 'var(--foreground)' }}>
+                    {step}
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <div style={{ fontFamily: 'var(--font-inter)', fontSize: '0.875rem', color: 'var(--muted-foreground)' }}>—</div>
+            )}
+          </div>
+          {incident.slackPosted && (
+            <div style={{ fontFamily: 'var(--font-jetbrains)', fontSize: '0.72rem', color: 'var(--primary)' }}>
+              ✓ Posted to Slack
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        fontFamily: 'var(--font-jetbrains)',
+        fontSize: '0.64rem',
+        fontWeight: 600,
+        letterSpacing: '0.1em',
+        textTransform: 'uppercase',
+        color: 'var(--muted-foreground)',
+      }}
+    >
+      {children}
+    </div>
+  )
+}
+
+function AnalysisField({ label, value, accent, mono }: { label: string; value: string; accent?: boolean; mono?: boolean }) {
+  return (
+    <div>
+      <FieldLabel>{label}</FieldLabel>
+      <div
+        style={{
+          marginTop: 4,
+          fontFamily: mono ? 'var(--font-jetbrains)' : 'var(--font-inter)',
+          fontSize: '0.9rem',
+          fontWeight: accent ? 700 : 500,
+          color: accent ? 'var(--primary)' : 'var(--foreground)',
+          wordBreak: 'break-word',
         }}
       >
         {value}

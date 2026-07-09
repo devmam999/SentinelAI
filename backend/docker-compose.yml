@@ -1,0 +1,22 @@
+services:
+  # The app package: FastAPI backend + embedded ChromaDB engine + Gemini/GitHub/Slack.
+  backend:
+    build: .
+    container_name: sentinelai-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.local
+    environment:
+      # ChromaDB writes here; this path is backed by the dedicated volume below.
+      CHROMA_PERSIST_DIR: /app/data/chroma
+    volumes:
+      # ChromaDB's on-disk vector store lives on its own Docker-managed volume,
+      # separate from the app image, so indexed runbooks survive rebuilds and
+      # restarts.
+      - chroma-data:/app/data/chroma
+    restart: unless-stopped
+
+# Dedicated named volume for ChromaDB data (the only stateful piece).
+volumes:
+  chroma-data:
