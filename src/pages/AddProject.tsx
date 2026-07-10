@@ -4,6 +4,13 @@ import { useAuth } from '../context/AuthContext'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
 import * as s from '../components/authStyles'
 
+const RUNBOOK_REQUIRED_SECTIONS = [
+  'How to set up and run the service',
+  'How to test or verify that it works',
+  'What common errors or symptoms to look for',
+  'What action to take for each error',
+] as const
+
 export default function AddProject() {
   const navigate = useNavigate()
   const { user } = useAuth()
@@ -288,6 +295,52 @@ export default function AddProject() {
             <label htmlFor="runbook-files" style={s.label}>
               Runbooks
             </label>
+
+            <div
+              style={{
+                marginBottom: 14,
+                background: 'rgba(0,214,143,0.05)',
+                border: '1px solid rgba(0,214,143,0.18)',
+                borderRadius: 8,
+                padding: '14px 16px',
+              }}
+            >
+              <div
+                style={{
+                  fontFamily: 'var(--font-inter)',
+                  fontSize: '0.82rem',
+                  fontWeight: 600,
+                  color: 'var(--foreground)',
+                  marginBottom: 10,
+                }}
+              >
+                Each runbook must include these required sections:
+              </div>
+              <ul
+                style={{
+                  margin: 0,
+                  paddingLeft: 18,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                  listStyleType: 'disc',
+                }}
+              >
+                {RUNBOOK_REQUIRED_SECTIONS.map((section) => (
+                  <li
+                    key={section}
+                    style={{
+                      fontFamily: 'var(--font-inter)',
+                      fontSize: '0.82rem',
+                      color: 'var(--muted-foreground)',
+                      lineHeight: 1.45,
+                    }}
+                  >
+                    <span style={{ color: 'var(--foreground)', fontWeight: 600 }}>{section}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
 
             {/* Upload dropzone */}
             <label
