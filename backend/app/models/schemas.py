@@ -42,6 +42,15 @@ class RunbookMatch(BaseModel):
     distance: float | None = None
 
 
+class RunbookValidateRequest(BaseModel):
+    content: str = Field(..., description="Full runbook text to validate.")
+
+
+class RunbookValidateResponse(BaseModel):
+    valid: bool
+    missing_sections: list[str] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Incident analysis
 # --------------------------------------------------------------------------- #

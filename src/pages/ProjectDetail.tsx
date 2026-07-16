@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
-import { analyzeIncident, indexRunbook, type IncidentAnalysis } from '../lib/api'
+import { analyzeIncident, indexRunbookFile, type IncidentAnalysis } from '../lib/api'
 
 type Project = {
   id: string
@@ -73,23 +73,24 @@ export default function ProjectDetail() {
   const recentIncidents = incidents.filter((i) => i.status === 'resolved')
   const isHealthy = activeIncidents.length === 0
 
-  // Best-effort: push this project's markdown runbooks into the backend so
-  // Sentinel's ChromaDB semantic search has content to match. PDFs are skipped
-  // (they need server-side parsing). Individual failures are ignored.
+  // Best-effort: push this project's runbooks (.md and .pdf) into ChromaDB so
+  // Sentinel's semantic search has content to match. PDFs are parsed server-side.
   const indexRunbooksBestEffort = async () => {
     if (!project) return
-    const markdown = parseRunbooks(project.runbooks).filter((p) => /\.md$/i.test(p))
+    const runbookPaths = parseRunbooks(project.runbooks).filter((p) => /\.(md|pdf)$/i.test(p))
     await Promise.all(
-      markdown.map(async (path) => {
+      runbookPaths.map(async (path) => {
         try {
           const { data } = await supabase.storage.from('runbooks').createSignedUrl(path, 60)
           if (!data?.signedUrl) return
-          const content = await fetch(data.signedUrl).then((r) => r.text())
-          await indexRunbook({
+          const blob = await fetch(data.signedUrl).then((r) => r.blob())
+          const file = new File([blob], baseName(path), {
+            type: blob.type || (/\.pdf$/i.test(path) ? 'application/pdf' : 'text/markdown'),
+          })
+          await indexRunbookFile(file, {
             id: `${project.id}/${path}`,
             title: baseName(path),
-            content,
-            metadata: { project_id: project.id },
+            projectId: project.id,
           })
         } catch {
           /* best-effort */

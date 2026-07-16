@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate, useParams, Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
+import { validateRunbookFile } from '../lib/api'
 import * as s from '../components/authStyles'
 
 const RUNBOOK_REQUIRED_SECTIONS = [
@@ -10,6 +11,11 @@ const RUNBOOK_REQUIRED_SECTIONS = [
   'What common errors or symptoms to look for',
   'What action to take for each error',
 ] as const
+
+type RunbookFileError = {
+  fileName: string
+  missingSections: string[]
+}
 
 export default function AddProject() {
   const navigate = useNavigate()
@@ -25,6 +31,8 @@ export default function AddProject() {
   // Newly selected files to upload on save.
   const [files, setFiles] = useState<File[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [runbookErrors, setRunbookErrors] = useState<RunbookFileError[]>([])
+  const [validatingRunbooks, setValidatingRunbooks] = useState(false)
   const [saving, setSaving] = useState(false)
   // When editing, load the existing project's values before showing the form.
   const [initializing, setInitializing] = useState(isEditing)
@@ -60,20 +68,58 @@ export default function AddProject() {
 
   const isAllowed = (fileName: string) => /\.(md|pdf)$/i.test(fileName)
 
-  const handleFilesSelected = (list: FileList | null) => {
+  const validateFiles = async (candidates: File[]): Promise<{ accepted: File[]; rejected: RunbookFileError[] }> => {
+    const accepted: File[] = []
+    const rejected: RunbookFileError[] = []
+
+    for (const file of candidates) {
+      try {
+        const result = await validateRunbookFile(file)
+        if (result.valid) {
+          accepted.push(file)
+        } else {
+          rejected.push({ fileName: file.name, missingSections: result.missing_sections })
+        }
+      } catch (err) {
+        rejected.push({
+          fileName: file.name,
+          missingSections: [
+            err instanceof Error
+              ? err.message
+              : 'Runbook validation failed. Is the backend running?',
+          ],
+        })
+      }
+    }
+
+    return { accepted, rejected }
+  }
+
+  const handleFilesSelected = async (list: FileList | null) => {
     if (!list) return
     const picked = Array.from(list)
-    const accepted = picked.filter((f) => isAllowed(f.name))
-    if (accepted.length !== picked.length) {
+    const allowed = picked.filter((f) => isAllowed(f.name))
+    if (allowed.length !== picked.length) {
       setError('Only .md or .pdf files are allowed.')
-    } else {
-      setError(null)
+      return
     }
-    setFiles((prev) => [...prev, ...accepted])
+
+    setError(null)
+    setValidatingRunbooks(true)
+    const { accepted, rejected } = await validateFiles(allowed)
+    setValidatingRunbooks(false)
+
+    if (accepted.length) {
+      setFiles((prev) => [...prev, ...accepted])
+    }
+    setRunbookErrors(rejected)
   }
 
   const removeExisting = (index: number) => setExistingRunbooks((prev) => prev.filter((_, i) => i !== index))
-  const removeFile = (index: number) => setFiles((prev) => prev.filter((_, i) => i !== index))
+  const removeFile = (index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index))
+    setRunbookErrors([])
+  }
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -95,8 +141,20 @@ export default function AddProject() {
       setError('Please upload at least one runbook (.md or .pdf).')
       return
     }
+    if (runbookErrors.length > 0) {
+      return
+    }
 
     setSaving(true)
+
+    // Re-validate before upload so stale files cannot slip through.
+    const { accepted, rejected } = await validateFiles(files)
+    if (rejected.length > 0) {
+      setRunbookErrors(rejected)
+      setFiles(accepted)
+      setSaving(false)
+      return
+    }
 
     // Upload any newly selected files to the private "runbooks" storage bucket,
     // under a per-user folder so Storage RLS keeps them isolated per account.
@@ -342,6 +400,69 @@ export default function AddProject() {
               </ul>
             </div>
 
+            {runbookErrors.length > 0 && (
+              <div
+                style={{
+                  marginBottom: 14,
+                  background: '#c62828',
+                  color: '#ffffff',
+                  borderRadius: 8,
+                  padding: '14px 16px',
+                }}
+              >
+                {runbookErrors.map((item) => (
+                  <div key={item.fileName} style={{ marginBottom: runbookErrors.length > 1 ? 14 : 0 }}>
+                    <div
+                      style={{
+                        fontFamily: 'var(--font-inter)',
+                        fontSize: '0.88rem',
+                        fontWeight: 700,
+                        marginBottom: 8,
+                      }}
+                    >
+                      {item.fileName} is missing required sections:
+                    </div>
+                    <ul
+                      style={{
+                        margin: 0,
+                        paddingLeft: 18,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                        listStyleType: 'disc',
+                      }}
+                    >
+                      {item.missingSections.map((section) => (
+                        <li
+                          key={section}
+                          style={{
+                            fontFamily: 'var(--font-inter)',
+                            fontSize: '0.84rem',
+                            lineHeight: 1.45,
+                          }}
+                        >
+                          {section}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {validatingRunbooks && (
+              <div
+                style={{
+                  marginBottom: 14,
+                  fontFamily: 'var(--font-jetbrains)',
+                  fontSize: '0.8rem',
+                  color: 'var(--muted-foreground)',
+                }}
+              >
+                Validating runbook sections…
+              </div>
+            )}
+
             {/* Upload dropzone */}
             <label
               htmlFor="runbook-files"
@@ -370,7 +491,7 @@ export default function AddProject() {
                 Upload runbooks
               </span>
               <span style={{ fontFamily: 'var(--font-inter)', fontSize: '0.8rem', color: 'var(--muted-foreground)' }}>
-                Click to browse — .md or .pdf files only
+                Click to browse — .md or .pdf files only (both are validated)
               </span>
             </label>
             <input
@@ -401,7 +522,7 @@ export default function AddProject() {
           <div style={{ display: 'flex', gap: 10 }}>
             <button
               type="submit"
-              disabled={saving}
+              disabled={saving || validatingRunbooks || runbookErrors.length > 0}
               style={{
                 ...s.primaryButton,
                 width: 'auto',

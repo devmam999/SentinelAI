@@ -1,12 +1,89 @@
-"""Runbook indexing + semantic search endpoints."""
+"""Runbook indexing, validation, and semantic search endpoints."""
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
-from ...models.schemas import RunbookInput, RunbookMatch
-from ...services import chroma_service
+from ...models.schemas import (
+    RunbookInput,
+    RunbookMatch,
+    RunbookValidateRequest,
+    RunbookValidateResponse,
+)
+from ...services import chroma_service, runbook_validation_service
 
 router = APIRouter(prefix="/api/runbooks", tags=["runbooks"])
+
+
+def _runbook_title(filename: str, title: str | None) -> str:
+    if title and title.strip():
+        return title.strip()
+    return (filename or "runbook").rsplit("/", 1)[-1]
+
+
+@router.post("/validate", response_model=RunbookValidateResponse)
+async def validate(body: RunbookValidateRequest) -> RunbookValidateResponse:
+    """Semantic check that a runbook contains all required sections."""
+
+    try:
+        missing = await run_in_threadpool(
+            runbook_validation_service.validate_sections, body.content
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return RunbookValidateResponse(valid=len(missing) == 0, missing_sections=missing)
+
+
+@router.post("/validate-file", response_model=RunbookValidateResponse)
+async def validate_file(file: UploadFile = File(...)) -> RunbookValidateResponse:
+    """Validate an uploaded .md or .pdf runbook file."""
+
+    data = await file.read()
+    try:
+        content = await run_in_threadpool(
+            runbook_validation_service.read_runbook_bytes, data, file.filename or ""
+        )
+        missing = await run_in_threadpool(runbook_validation_service.validate_sections, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read runbook: {exc}") from exc
+
+    return RunbookValidateResponse(valid=len(missing) == 0, missing_sections=missing)
+
+
+@router.post("/index-file", status_code=201)
+async def index_file(
+    file: UploadFile = File(...),
+    runbook_id: str = Form(...),
+    title: str = Form(""),
+    project_id: str = Form(""),
+) -> dict:
+    """Parse an uploaded .md or .pdf runbook and index it in ChromaDB."""
+
+    data = await file.read()
+    try:
+        content = await run_in_threadpool(
+            runbook_validation_service.read_runbook_bytes, data, file.filename or ""
+        )
+        metadata = {"project_id": project_id} if project_id else {}
+        runbook = RunbookInput(
+            id=runbook_id,
+            title=_runbook_title(file.filename or "", title),
+            content=content,
+            metadata=metadata,
+        )
+        await run_in_threadpool(chroma_service.add_runbook, runbook)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not index runbook: {exc}") from exc
+
+    return {"status": "indexed", "id": runbook_id}
 
 
 @router.post("", status_code=201)

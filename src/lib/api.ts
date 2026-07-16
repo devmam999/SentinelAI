@@ -24,6 +24,11 @@ export type RunbookMatch = {
   distance: number | null
 }
 
+export type RunbookValidateResult = {
+  valid: boolean
+  missing_sections: string[]
+}
+
 export type IncidentResponse = {
   analysis: IncidentAnalysis
   slack_posted: boolean
@@ -60,7 +65,37 @@ export async function analyzeIncident(input: AnalyzeInput): Promise<IncidentResp
   return res.json()
 }
 
-/** Index a single runbook for semantic search (best-effort from the UI). */
+/** Semantic validation — checks required runbook sections via the backend. */
+export async function validateRunbookFile(file: File): Promise<RunbookValidateResult> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`${API_URL}/api/runbooks/validate-file`, {
+    method: 'POST',
+    body: form,
+  })
+  if (!res.ok) throw new Error(await parseError(res))
+  return res.json()
+}
+
+/** Index a .md or .pdf runbook file into ChromaDB (server parses PDFs). */
+export async function indexRunbookFile(
+  file: File,
+  meta: { id: string; title: string; projectId?: string },
+): Promise<void> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('runbook_id', meta.id)
+  form.append('title', meta.title)
+  if (meta.projectId) form.append('project_id', meta.projectId)
+
+  const res = await fetch(`${API_URL}/api/runbooks/index-file`, {
+    method: 'POST',
+    body: form,
+  })
+  if (!res.ok) throw new Error(await parseError(res))
+}
+
+/** Index a single runbook for semantic search (plain-text / markdown content). */
 export async function indexRunbook(runbook: {
   id: string
   title: string

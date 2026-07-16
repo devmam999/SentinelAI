@@ -14,3 +14,7 @@ google-genai>=1.0.0
 
 # --- Vector store (runbook semantic search) ---
 chromadb>=0.5.0,<2.0
+
+# --- Runbook PDF text extraction ---
+pypdf>=5.0,<7.0
+python-multipart>=0.0.9,<1.0
