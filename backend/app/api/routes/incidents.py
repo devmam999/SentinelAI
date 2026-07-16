@@ -20,6 +20,15 @@ async def analyze(request: IncidentRequest) -> IncidentResponse:
     except RuntimeError as exc:  # missing API key, etc.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 401 and "github.com" in str(exc.request.url):
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "GitHub authentication failed. Set a valid GITHUB_TOKEN in "
+                    "backend/.env.local (create one at https://github.com/settings/tokens "
+                    "with repo read access), then restart the backend."
+                ),
+            ) from exc
         raise HTTPException(
             status_code=exc.response.status_code,
             detail=f"Upstream error: {exc.response.text}",

@@ -6,6 +6,18 @@ from ...config import get_settings
 
 router = APIRouter(tags=["health"])
 
+_PLACEHOLDERS = {
+    "github_token": {"your-github-pat"},
+    "slack_webhook_url": {"https://hooks.slack.com/services/XXX/YYY/ZZZ"},
+    "gemini_api_key": {"your-gemini-api-key"},
+}
+
+
+def _configured(value: str | None, key: str) -> bool:
+    if not value:
+        return False
+    return value not in _PLACEHOLDERS.get(key, set())
+
 
 @router.get("/health")
 def health() -> dict:
@@ -13,8 +25,8 @@ def health() -> dict:
     return {
         "status": "ok",
         "integrations": {
-            "gemini": bool(settings.gemini_api_key),
-            "github": bool(settings.github_token),
-            "slack": bool(settings.slack_webhook_url),
+            "gemini": _configured(settings.gemini_api_key, "gemini_api_key"),
+            "github": _configured(settings.github_token, "github_token"),
+            "slack": _configured(settings.slack_webhook_url, "slack_webhook_url"),
         },
     }
