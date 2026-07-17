@@ -347,6 +347,28 @@ export default function AddProject() {
               onFocus={(e) => (e.target.style.borderColor = 'var(--primary)')}
               onBlur={(e) => (e.target.style.borderColor = 'var(--border)')}
             />
+            <p
+              style={{
+                marginTop: 8,
+                fontFamily: 'var(--font-inter)',
+                fontSize: '0.8rem',
+                color: 'var(--muted-foreground)',
+                lineHeight: 1.45,
+              }}
+            >
+              Get your Incoming Webhook URL from{' '}
+              <a
+                href="https://api.slack.com/apps"
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: 'var(--primary)', textDecoration: 'none' }}
+                onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+                onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+              >
+                api.slack.com/apps
+              </a>
+              .
+            </p>
           </div>
 
           <div style={{ marginBottom: 28 }}>
