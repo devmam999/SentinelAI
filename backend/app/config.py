@@ -46,6 +46,7 @@ class Settings(BaseSettings):
             "http://localhost:8443",
             "http://localhost:5173",
             "http://127.0.0.1:8443",
+            "https://sentinel-ai-coral-nine.vercel.app",
         ]
     )
     # Deployed frontend origin for CORS (e.g. your Vercel URL).

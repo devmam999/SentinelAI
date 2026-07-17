@@ -63,10 +63,14 @@ def _to_commit(raw: dict) -> CommitInfo:
     )
 
 
+def _client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=20, follow_redirects=True)
+
+
 async def list_recent_commits(owner: str, repo: str, limit: int = 30) -> list[CommitInfo]:
     settings = get_settings()
     url = f"{settings.github_api_url}/repos/{owner}/{repo}/commits"
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with _client() as client:
         resp = await client.get(
             url, headers=_headers(), params={"per_page": max(1, min(limit, 100))}
         )
@@ -82,7 +86,7 @@ async def compare_commits(
 
     settings = get_settings()
     url = f"{settings.github_api_url}/repos/{owner}/{repo}/compare/{base}...{head}"
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with _client() as client:
         resp = await client.get(url, headers=_headers())
         resp.raise_for_status()
         data = resp.json()
@@ -95,7 +99,7 @@ async def list_deployments(owner: str, repo: str, limit: int = 5) -> list[Deploy
     settings = get_settings()
     url = f"{settings.github_api_url}/repos/{owner}/{repo}/deployments"
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with _client() as client:
             resp = await client.get(
                 url, headers=_headers(), params={"per_page": max(1, min(limit, 100))}
             )

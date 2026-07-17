@@ -29,8 +29,10 @@ async def analyze(request: IncidentRequest) -> IncidentResponse:
                     "with repo read access), then restart the backend."
                 ),
             ) from exc
+        # Never forward redirect/non-JSON upstream statuses (e.g. 301) to the browser —
+        # browsers treat those as CORS failures on cross-origin fetch().
         raise HTTPException(
-            status_code=exc.response.status_code,
+            status_code=502,
             detail=f"Upstream error: {exc.response.text}",
         ) from exc
 

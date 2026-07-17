@@ -21,7 +21,7 @@ async def commits(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
-            status_code=exc.response.status_code,
+            status_code=502,
             detail=f"GitHub API error: {exc.response.text}",
         ) from exc
 
