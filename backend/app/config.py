@@ -7,6 +7,7 @@ so nothing sensitive is ever committed. Access settings through
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,11 +41,15 @@ class Settings(BaseSettings):
     runbooks_collection: str = "runbooks"
 
     # --- Server ---
-    cors_origins: list[str] = [
-        "http://localhost:8443",
-        "http://localhost:5173",
-        "http://127.0.0.1:8443",
-    ]
+    cors_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:8443",
+            "http://localhost:5173",
+            "http://127.0.0.1:8443",
+        ]
+    )
+    # Deployed frontend origin for CORS (e.g. your Vercel URL).
+    frontend_url: str | None = None
 
 
 @lru_cache
