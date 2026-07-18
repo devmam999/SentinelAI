@@ -1,8 +1,10 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { supabase, isSupabaseConfigured } from '../lib/supabase'
 import AuthLayout from '../components/AuthLayout'
+import PasswordRequirements from '../components/PasswordRequirements'
 import * as s from '../components/authStyles'
+import { isPasswordValid } from '../lib/passwordValidation'
+import { supabase, isSupabaseConfigured } from '../lib/supabase'
 
 export default function SignUp() {
   const navigate = useNavigate()
@@ -22,8 +24,8 @@ export default function SignUp() {
       return
     }
 
-    if (password.length < 6) {
-      setError('Password must be at least 6 characters.')
+    if (!isPasswordValid(password)) {
+      setError('Please meet all password requirements before signing up.')
       return
     }
 
@@ -95,17 +97,18 @@ export default function SignUp() {
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder="At least 6 characters"
+            placeholder="Create a strong password"
             required
             style={s.input}
             onFocus={(e) => (e.target.style.borderColor = 'var(--primary)')}
             onBlur={(e) => (e.target.style.borderColor = 'var(--border)')}
           />
+          <PasswordRequirements password={password} />
         </div>
 
         <button
           type="submit"
-          disabled={loading}
+          disabled={loading || !isPasswordValid(password)}
           style={{ ...s.primaryButton, opacity: loading ? 0.6 : 1, cursor: loading ? 'default' : 'pointer' }}
           onMouseEnter={(e) => !loading && (e.currentTarget.style.opacity = '0.85')}
           onMouseLeave={(e) => !loading && (e.currentTarget.style.opacity = '1')}
