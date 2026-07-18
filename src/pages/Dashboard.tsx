@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import DeleteProjectModal from '../components/DeleteProjectModal'
 import { useAuth } from '../context/AuthContext'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
 
@@ -19,6 +20,7 @@ export default function Dashboard() {
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null)
 
   useEffect(() => {
     let active = true
@@ -55,15 +57,9 @@ export default function Dashboard() {
     await signOut()
   }
 
-  const handleDelete = async (project: Project) => {
-    if (!window.confirm(`Delete "${project.name}"? This can't be undone.`)) return
-
-    const { error } = await supabase.from('projects').delete().eq('id', project.id)
-    if (error) {
-      setError(error.message)
-      return
-    }
-    setProjects((current) => current.filter((p) => p.id !== project.id))
+  const handleDeleted = (projectId: string) => {
+    setProjects((current) => current.filter((p) => p.id !== projectId))
+    setDeleteTarget(null)
   }
 
   return (
@@ -305,12 +301,20 @@ export default function Dashboard() {
                 project={project}
                 onOpen={() => navigate(`/project/${project.id}`)}
                 onEdit={() => navigate(`/edit-project/${project.id}`)}
-                onDelete={() => handleDelete(project)}
+                onDelete={() => setDeleteTarget(project)}
               />
             ))}
           </div>
         )}
       </main>
+
+      {deleteTarget && (
+        <DeleteProjectModal
+          project={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onDeleted={handleDeleted}
+        />
+      )}
     </div>
   )
 }
