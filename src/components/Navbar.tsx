@@ -110,14 +110,14 @@ export default function Navbar() {
             background: 'var(--primary)',
             border: 'none',
             cursor: 'pointer',
-            padding: '8px 20px',
+            padding: '8px 16px',
             borderRadius: 4,
             transition: 'opacity 0.15s',
           }}
           onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.85')}
           onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
         >
-          Sign up free
+          Sign up
         </button>
       </div>
 
@@ -205,11 +205,11 @@ export default function Navbar() {
                 background: 'var(--primary)',
                 border: 'none',
                 cursor: 'pointer',
-                padding: '10px 20px',
+                padding: '10px 16px',
                 borderRadius: 4,
               }}
             >
-              Sign up free
+              Sign up
             </button>
           </div>
         </div>

@@ -39,7 +39,7 @@ export default function Login() {
         <>
           Don&apos;t have an account?{' '}
           <Link to="/signup" style={s.authLink}>
-            Sign up free
+            Sign up
           </Link>
         </>
       }

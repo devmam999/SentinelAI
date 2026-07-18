@@ -109,11 +109,11 @@ export default function SignUp() {
         <button
           type="submit"
           disabled={loading || !isPasswordValid(password)}
-          style={{ ...s.primaryButton, opacity: loading ? 0.6 : 1, cursor: loading ? 'default' : 'pointer' }}
+          style={{ ...s.primaryButton, padding: '11px 16px', opacity: loading ? 0.6 : 1, cursor: loading ? 'default' : 'pointer' }}
           onMouseEnter={(e) => !loading && (e.currentTarget.style.opacity = '0.85')}
           onMouseLeave={(e) => !loading && (e.currentTarget.style.opacity = '1')}
         >
-          {loading ? 'Creating account…' : 'Sign up free'}
+          {loading ? 'Creating account…' : 'Sign up'}
         </button>
       </form>
     </AuthLayout>
