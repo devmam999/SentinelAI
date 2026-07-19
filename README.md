@@ -35,10 +35,16 @@ Alert ─▶ FastAPI backend
              └─▶ Slack Webhook   → formatted incident report in your channel
 ```
 
-The **frontend** (React) lets a user sign up, connect a project (GitHub repo,
-Slack webhook, runbooks), and trigger/inspect incident analyses. **Supabase**
-handles authentication, the projects database, and runbook file storage. The
-**backend** (FastAPI) runs the AI incident pipeline.
+The **frontend** (React) lets a user sign up with a username, connect projects
+(GitHub repo, Slack webhook, runbooks), manage account settings, and trigger
+incident analyses. **Supabase** handles authentication, user profiles,
+the projects database, and runbook file storage. The **backend** (FastAPI,
+Docker) runs the AI incident pipeline and persists ChromaDB vectors on a
+dedicated volume.
+
+**Recommended production layout:** frontend on **Vercel**, backend on **Render**
+(or any Docker host with a persistent volume). The backend is not a good fit for
+serverless-only deploys because ChromaDB needs durable disk.
 
 ---
 
@@ -47,159 +53,161 @@ handles authentication, the projects database, and runbook file storage. The
 ```
 SentinelAI/
 ├── src/                          # Frontend — React + Vite + Tailwind (dark/green theme)
-│   ├── components/               # Navbar, Hero, Features, HowItWorks, auth layout, etc.
+│   ├── components/
+│   │   ├── AppHeader.tsx         # Dashboard header (username, Settings, Sign out)
+│   │   ├── AuthLayout.tsx        # Sign-in / sign-up shell
+│   │   ├── DeleteAccountModal.tsx
+│   │   ├── DeleteProjectModal.tsx
+│   │   ├── PasswordRequirements.tsx
+│   │   └── …                     # Navbar, Hero, Features, HowItWorks, etc.
 │   ├── context/
-│   │   └── AuthContext.tsx       # Supabase session provider
+│   │   └── AuthContext.tsx       # Supabase session + profile provider
 │   ├── lib/
 │   │   ├── supabase.ts           # Supabase client (auth, DB, storage)
-│   │   └── api.ts                # Client for the FastAPI backend
+│   │   ├── api.ts                # Client for the FastAPI backend
+│   │   ├── profile.ts            # Profile helpers + login username lookup RPCs
+│   │   ├── passwordValidation.ts
+│   │   └── usernameValidation.ts
 │   ├── pages/
-│   │   ├── Landing.tsx           # Marketing homepage
-│   │   ├── Login.tsx / SignUp.tsx
-│   │   ├── Dashboard.tsx         # List / create / manage projects
-│   │   ├── AddProject.tsx        # Create & edit projects (with runbook upload)
-│   │   └── ProjectDetail.tsx     # Status, integrations, live incident analysis
-│   ├── App.tsx                   # Routes (public + protected)
-│   └── index.css                 # Theme tokens + page animations
+│   │   ├── Landing.tsx
+│   │   ├── Login.tsx             # Username or email + password
+│   │   ├── SignUp.tsx            # Username, email, password + strength meter
+│   │   ├── Dashboard.tsx         # Projects list, delete with sudo confirmation
+│   │   ├── Settings.tsx          # Change username / email / password, delete account
+│   │   ├── AddProject.tsx        # Create & edit projects + runbook upload
+│   │   └── ProjectDetail.tsx     # Live incident analysis
+│   ├── App.tsx
+│   └── index.css
 │
-├── backend/                      # Backend — FastAPI incident-response service (runs in Docker)
+├── backend/                      # FastAPI incident-response service (Docker)
 │   ├── app/
-│   │   ├── main.py               # App factory + router wiring
-│   │   ├── config.py             # Env-driven settings
-│   │   ├── models/schemas.py     # Pydantic request/response/analysis models
+│   │   ├── main.py               # App factory, CORS (localhost + FRONTEND_URL + Vercel)
+│   │   ├── config.py
+│   │   ├── models/schemas.py
 │   │   ├── services/
-│   │   │   ├── github_service.py   # Commit / deployment / compare lookups
-│   │   │   ├── slack_service.py    # Block Kit incident message + webhook post
-│   │   │   ├── chroma_service.py   # Runbook vector store (Gemini embeddings)
-│   │   │   ├── gemini_service.py   # Structured analysis + embeddings
-│   │   │   └── incident_service.py # Orchestrates the full pipeline
+│   │   │   ├── github_service.py
+│   │   │   ├── slack_service.py
+│   │   │   ├── chroma_service.py
+│   │   │   ├── gemini_service.py
+│   │   │   ├── runbook_validation_service.py  # Semantic section checks + PDF parsing
+│   │   │   └── incident_service.py
 │   │   └── api/routes/           # health, github, runbooks, incidents
-│   ├── requirements.txt          # Python deps — the manifest the image builds from
-│   ├── Dockerfile                # The app image ("everything else" package)
-│   ├── docker-compose.yml        # Runs the backend + mounts ChromaDB's dedicated volume
-│   └── .env.example              # Backend env template
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   ├── docker-compose.yml        # Backend + chroma-data volume
+│   └── .env.example
 │
 ├── supabase/
-│   └── schema.sql                # Database — profiles, projects, RLS, runbooks storage bucket
+│   └── schema.sql                # profiles, projects, RLS, storage, auth RPCs
 │
 ├── index.html
-├── package.json                  # Frontend dependencies & scripts
+├── package.json
 ├── vite.config.ts
-├── .env.example                  # Frontend env template
-└── README.md                     # (this file)
+├── .env.example
+└── README.md
 
-# Not in the repo — created/managed by Docker at runtime:
-#   chroma-data (named volume)   # ChromaDB's on-disk vector store, mounted at
-#                                # /app/data/chroma inside the backend container.
+# Not in the repo — created at runtime:
+#   chroma-data (Docker volume)   # ChromaDB vectors at /app/data/chroma in the container
 ```
 
-> **Backend runs in Docker.** The FastAPI app (with its embedded ChromaDB
-> engine and the Gemini/GitHub/Slack integrations) is packaged into a single
-> Docker image, and ChromaDB's data is persisted to a **separate, dedicated
-> Docker volume** (`chroma-data`) — it is never stored inside the repo or the
-> image itself.
+> **Backend runs in Docker.** The FastAPI app (ChromaDB, Gemini, GitHub, Slack)
+> is packaged into one image. Vector data lives in a **separate named volume**
+> (`chroma-data`), not in the repo or image.
 
 ---
 
 ## Prerequisites
 
-- **Docker** + **Docker Compose** — **required** to run the backend (see §3)
+- **Docker** + **Docker Compose** — required for the backend (see §3)
 - **Node.js** 18+ and npm (frontend)
 - A **Supabase** account (free tier is fine)
 - A **Gemini API key** — <https://aistudio.google.com/apikey>
-- A **GitHub** personal access token (repo read) and a **Slack** incoming webhook
+- A **GitHub** personal access token (repo read)
+- A **Slack** incoming webhook — create an app at <https://api.slack.com/apps>
 
 ---
 
 ## 1. Database setup (Supabase)
 
-Supabase provides three things for this app: **authentication**, the
-**projects database**, and **runbook file storage**.
+Supabase provides **authentication**, **user profiles**, the **projects
+database**, and **runbook file storage**.
 
-1. Go to <https://supabase.com/dashboard> and create a **New project** (pick a
-   region, set a database password; provisioning takes ~2 minutes).
+1. Go to <https://supabase.com/dashboard> and create a **New project**.
 2. Open **SQL Editor → New query**, paste the **entire** contents of
    [`supabase/schema.sql`](supabase/schema.sql), and click **Run**. The file is
-   safe to re-run and is organized into numbered sections:
+   idempotent (safe to re-run) and includes:
 
-   | Section | What it sets up                                                        |
-   | ------- | ---------------------------------------------------------------------- |
-   | 1–2     | `profiles` table + Row Level Security.                                  |
-   | 3       | Trigger that auto-creates a profile row on signup.                     |
-   | 4       | Backfills profiles for any users who signed up earlier.               |
-   | **5**   | **`projects` table** (name, GitHub repo, Slack webhook, runbooks) + RLS. |
-   | **6**   | **`runbooks` private storage bucket** + per-user access policies.       |
+   | Section | What it sets up |
+   | ------- | ---------------- |
+   | 1–2 | `profiles` table (with **username**), Row Level Security |
+   | 3 | Trigger: auto-create profile on signup (reads `username` from auth metadata) |
+   | 4 | Backfill profiles for existing auth users |
+   | 5 | **`projects` table** + RLS |
+   | 6 | **`runbooks` private storage bucket** + per-user policies |
+   | RPCs | `resolve_login_email`, `is_username_available`, `update_username`, `delete_own_account` |
 
-   > Sections **5** and **6** are what power the projects + runbook-upload
-   > features — make sure they run. Running the whole file end-to-end is the
-   > simplest way to guarantee that.
+   **Username rules** (enforced in app + DB): max 20 characters, no spaces,
+   unique case-insensitively.
 
 3. Enable email auth: **Authentication → Providers → Email**.
-4. Grab your credentials for the frontend `.env.local` (next step):
+4. Grab credentials for frontend `.env.local`:
    - **Publishable key**: Settings → API Keys → *Publishable and secret API keys*
-     tab → copy the `sb_publishable_...` default key.
-   - **Project URL**: Integrations → Data API → *API URL*,
-     e.g. `https://<project-ref>.supabase.co/rest/v1` (remember to remove the /rest/v1).
+   - **Project URL**: Integrations → Data API → base URL (drop `/rest/v1`)
 
-   > Full step-by-step (including where these moved in the new dashboard) is
-   > also documented in [`.env.example`](.env.example).
+   See [`.env.example`](.env.example) for step-by-step dashboard navigation.
 
 ---
 
 ## 2. Frontend setup
 
-The frontend reads its configuration from a **`.env.local`** file at the repo
-root (Vite only exposes variables prefixed with `VITE_`).
+Configuration lives in **`.env.local`** at the repo root (Vite exposes `VITE_*`
+variables only).
 
 1. Create it from the template:
 
    ```bash
-   # from the repo root
    cp .env.example .env.local
    ```
 
-2. Fill in the three values (from the Supabase step above + your backend URL):
+2. Fill in:
 
    ```env
-   # .env.local
    VITE_SUPABASE_URL=https://<project-ref>.supabase.co
    VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_xxxxxxxxxxxx
-   VITE_API_URL=http://localhost:8000        # base URL of the FastAPI backend
+   VITE_API_URL=http://localhost:8000
    ```
 
-3. Install dependencies and start the dev server:
+3. Install and run:
 
    ```bash
    npm install
    npm run dev                    # http://localhost:8443
    ```
 
-> `.env.local` is gitignored, so your credentials are never committed. If you
-> change it while the dev server is running, **restart `npm run dev`** so Vite
-> picks up the new values. In production, set `VITE_API_URL` to your deployed
+> Restart the dev server after changing `.env.local`. In production (e.g.
+> Vercel), set the same three variables; point `VITE_API_URL` at your deployed
 > backend URL.
+
+### Account & UI features
+
+| Area | Behavior |
+| ---- | -------- |
+| **Sign up** | Username (required), email, password with live strength meter and requirement checklist (8+ chars, symbol, upper, lower, number) |
+| **Log in** | **Username or email** + password |
+| **Dashboard** | Shows **username** (not email) in the header; **Settings** + red **Sign out** |
+| **Settings** | Change username (instant), email (confirmation to new address), password (new + confirm); delete account via `sudo delete [username]` modal |
+| **Projects** | Create/edit with GitHub repo, Slack webhook ([get one from Slack apps](https://api.slack.com/apps)), runbooks |
+| **Delete project** | In-app modal: confirm → type `sudo delete [Project Name]` |
+| **Runbooks** | `.md` or `.pdf`; must include four sections (validated semantically on upload) |
 
 ---
 
 ## 3. Backend setup (Docker)
 
-**Docker is required to run the backend — always.** ChromaDB and the AI/HTTP
-libraries pull in native dependencies whose builds differ across operating
-systems and CPUs, so the backend runs inside a container to guarantee it behaves
-identically on every machine (yours, a teammate's, or a server). The setup has
-two parts:
+ChromaDB and native AI/HTTP dependencies run in a container so behavior is
+consistent everywhere. Indexed runbooks persist in the **`chroma-data`** volume.
 
-- **The app package** — the FastAPI backend, plus its embedded ChromaDB engine
-  and the Gemini / GitHub / Slack integrations, is built into a **single Docker
-  image** from `requirements.txt`.
-- **A dedicated volume for ChromaDB data** — the runbook vector store is
-  persisted to a **separate, Docker-managed named volume** (`chroma-data`),
-  mounted into the container at `/app/data/chroma`. This keeps indexed runbooks
-  intact across rebuilds/restarts and separate from the app image.
-
-### Steps
-
-1. Configure the backend. All config lives in `backend/.env.local`:
+1. Configure `backend/.env.local`:
 
    ```bash
    cd backend
@@ -207,31 +215,38 @@ two parts:
    ```
 
    ```env
-   # backend/.env.local
    GEMINI_API_KEY=your-gemini-api-key
-   GITHUB_TOKEN=your-github-pat                 # recommended (avoids rate limits)
+   GITHUB_TOKEN=your-github-pat
    SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ   # optional fallback
+   FRONTEND_URL=http://localhost:8443                               # production: your Vercel URL
    ```
 
-2. Build and start it (from `backend/`):
+2. Build and start:
 
    ```bash
-   docker compose up --build      # serves on http://localhost:8000
+   docker compose up --build      # http://localhost:8000
    ```
 
    - API: <http://localhost:8000>
-   - Interactive docs: <http://localhost:8000/docs>
-
-The `chroma-data` volume is created automatically on first run and reused
-afterward. Useful commands:
+   - Docs: <http://localhost:8000/docs>
 
 ```bash
-docker volume ls                 # list volumes (look for "backend_chroma-data")
-docker compose down              # stop the backend (KEEPS the ChromaDB volume/data)
-docker compose down -v           # stop AND delete the ChromaDB volume (wipes runbooks)
+docker compose down              # stop (keeps ChromaDB volume)
+docker compose down -v           # stop and wipe indexed runbooks
 ```
 
-When deploying, set the frontend's `VITE_API_URL` to your public backend URL.
+---
+
+## 4. Production deployment (optional)
+
+| Service | Role | Notes |
+| ------- | ---- | ----- |
+| **Vercel** | Frontend SPA | Set `VITE_SUPABASE_*` and `VITE_API_URL` in project env vars |
+| **Render** (or similar) | Backend Docker service | Mount/persist Chroma volume; set `GEMINI_API_KEY`, `GITHUB_TOKEN`, `FRONTEND_URL` |
+| **Supabase** | Auth + DB + storage | Run `schema.sql`; enable Email provider |
+
+On the backend, **`FRONTEND_URL`** must match your live frontend origin for
+CORS. The app also allows `https://*.vercel.app` preview URLs.
 
 ---
 
@@ -239,36 +254,48 @@ When deploying, set the frontend's `VITE_API_URL` to your public backend URL.
 
 **Frontend** (`.env.local`)
 
-| Variable                        | Required    | Purpose                                                             |
-| ------------------------------- | ----------- | ------------------------------------------------------------------ |
-| `VITE_SUPABASE_URL`             | yes         | Supabase project URL.                                              |
-| `VITE_SUPABASE_PUBLISHABLE_KEY` | yes         | Supabase publishable (browser-safe) key.                          |
-| `VITE_API_URL`                  | recommended | Base URL of the FastAPI backend. Defaults to `http://localhost:8000` if unset — set it for any non-local backend. |
+| Variable | Required | Purpose |
+| -------- | -------- | ------- |
+| `VITE_SUPABASE_URL` | yes | Supabase project URL |
+| `VITE_SUPABASE_PUBLISHABLE_KEY` | yes | Browser-safe Supabase key |
+| `VITE_API_URL` | recommended | FastAPI base URL (default `http://localhost:8000`) |
 
 **Backend** (`backend/.env.local`)
 
-| Variable            | Required | Purpose                                          |
-| ------------------- | -------- | ------------------------------------------------ |
-| `GEMINI_API_KEY`    | yes      | Powers analysis **and** runbook embeddings.      |
-| `GITHUB_TOKEN`      | rec.     | Avoids rate limits; required for private repos.   |
-| `SLACK_WEBHOOK_URL` | optional | Global fallback webhook (per-project overrides).  |
+| Variable | Required | Purpose |
+| -------- | -------- | ------- |
+| `GEMINI_API_KEY` | yes | Analysis + runbook embeddings |
+| `GITHUB_TOKEN` | rec. | Rate limits; private repos |
+| `SLACK_WEBHOOK_URL` | optional | Global fallback webhook |
+| `FRONTEND_URL` | prod. | CORS allowlist for your frontend |
 
 ---
 
 ## API overview
 
-| Method | Path                      | Description                                   |
-| ------ | ------------------------- | --------------------------------------------- |
-| GET    | `/health`                 | Liveness + which integrations are configured. |
-| GET    | `/api/github/commits`     | Recent commits for `?repo=owner/name`.        |
-| GET    | `/api/github/deployments` | Recent deployments for a repo.                |
-| POST   | `/api/runbooks`           | Index a runbook for semantic search.          |
-| GET    | `/api/runbooks/search`    | Semantic search runbooks (`?q=...`).          |
-| POST   | `/api/incidents/analyze`  | Full pipeline → analysis + Slack post.        |
-| POST   | `/api/incidents/notify`   | Post a pre-built analysis to Slack.           |
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| GET | `/health` | Liveness + configured integrations |
+| GET | `/api/github/commits` | Recent commits for `?repo=owner/name` |
+| GET | `/api/github/deployments` | Recent deployments |
+| POST | `/api/runbooks/validate-file` | Upload `.md`/`.pdf`; semantic section validation |
+| POST | `/api/runbooks/index-file` | Parse + index a runbook file into ChromaDB |
+| POST | `/api/runbooks` | Index runbook JSON body |
+| GET | `/api/runbooks/search` | Semantic search (`?q=...`) |
+| POST | `/api/incidents/analyze` | Full pipeline → analysis + optional Slack post |
+| POST | `/api/incidents/notify` | Post a pre-built analysis to Slack |
 
-Interactive docs are served at <http://localhost:8000/docs> when the backend is
-running.
+Interactive docs: <http://localhost:8000/docs>
+
+### Runbook requirements (upload validation)
+
+Each runbook must cover these four topics (checked semantically, not just by
+heading text):
+
+1. How to set up and run the service
+2. How to test or verify that it works
+3. What common errors or symptoms to look for
+4. What action to take for each error
 
 ### Example: analyze an incident
 
@@ -283,16 +310,18 @@ curl -X POST http://localhost:8000/api/incidents/analyze \
   }'
 ```
 
-This runs the full pipeline and (when a webhook is provided) posts the
-`🚨 Production Incident` report shown at the top of this README to Slack.
-
 ---
 
 ## Typical workflow
 
-1. Start the backend (`docker compose up --build`) and the frontend (`npm run dev`).
-2. Sign up, then click **New Project** and connect a GitHub repo, a Slack
-   webhook, and upload runbooks (`.md` / `.pdf`).
-3. Open the project and click **Analyze Incident** (optionally describe the
-   alert). Sentinel indexes your markdown runbooks, scans commits, reasons with
-   Gemini, renders the incident on the page, and posts the report to Slack.
+1. Run `supabase/schema.sql`, configure `.env.local` files, start backend
+   (`docker compose up --build`) and frontend (`npm run dev`).
+2. **Sign up** with a username, email, and strong password.
+3. On the dashboard, click **New Project** — add a GitHub repo, Slack webhook
+   (from <https://api.slack.com/apps>), and upload runbooks (`.md` / `.pdf`).
+4. Open the project and click **Analyze Incident**. Sentinel validates and
+   indexes runbooks, scans commits, reasons with Gemini, shows results on the
+   page, and posts to Slack when a webhook is configured.
+5. Use **Settings** (header) to update username, email, or password, or delete
+   your account. Delete a project from the dashboard trash icon (requires
+   `sudo delete [Project Name]`).
