@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import AppHeader from '../components/AppHeader'
 import DeleteProjectModal from '../components/DeleteProjectModal'
 import { useAuth } from '../context/AuthContext'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
@@ -14,7 +15,7 @@ type Project = {
 }
 
 export default function Dashboard() {
-  const { user, signOut } = useAuth()
+  const { profile } = useAuth()
   const navigate = useNavigate()
 
   const [projects, setProjects] = useState<Project[]>([])
@@ -49,14 +50,6 @@ export default function Dashboard() {
     }
   }, [])
 
-  const handleSignOut = async () => {
-    // Navigate off the protected route BEFORE clearing the session. Otherwise
-    // signOut() flips the session to null while we're still on /dashboard, and
-    // ProtectedRoute redirects to /login before this navigate runs.
-    navigate('/', { replace: true })
-    await signOut()
-  }
-
   const handleDeleted = (projectId: string) => {
     setProjects((current) => current.filter((p) => p.id !== projectId))
     setDeleteTarget(null)
@@ -64,75 +57,7 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--background)', color: 'var(--foreground)' }}>
-      {/* Top bar */}
-      <header
-        className="flex items-center justify-between px-6 md:px-10"
-        style={{
-          height: 64,
-          borderBottom: '1px solid var(--border)',
-          background: 'rgba(6,10,6,0.85)',
-          backdropFilter: 'blur(12px)',
-          position: 'sticky',
-          top: 0,
-          zIndex: 10,
-        }}
-      >
-        <div className="flex items-center gap-2.5">
-          <div
-            className="flex items-center justify-center"
-            style={{ width: 28, height: 28, background: 'var(--primary)', borderRadius: 4 }}
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M8 1L14 4.5V11.5L8 15L2 11.5V4.5L8 1Z" stroke="#060a06" strokeWidth="1.5" fill="none" />
-              <circle cx="8" cy="8" r="2" fill="#060a06" />
-            </svg>
-          </div>
-          <span
-            style={{
-              fontFamily: 'var(--font-inter)',
-              fontWeight: 700,
-              fontSize: '1.05rem',
-              letterSpacing: '-0.02em',
-            }}
-          >
-            SentinelAI
-          </span>
-        </div>
-
-        <div className="flex items-center gap-4">
-          {user?.email && (
-            <span
-              className="hidden sm:inline"
-              style={{
-                fontFamily: 'var(--font-jetbrains)',
-                fontSize: '0.78rem',
-                color: 'var(--muted-foreground)',
-              }}
-            >
-              {user.email}
-            </span>
-          )}
-          <button
-            onClick={handleSignOut}
-            style={{
-              fontFamily: 'var(--font-inter)',
-              fontSize: '0.82rem',
-              fontWeight: 600,
-              color: 'var(--foreground)',
-              background: 'transparent',
-              border: '1px solid var(--border)',
-              cursor: 'pointer',
-              padding: '7px 14px',
-              borderRadius: 4,
-              transition: 'border-color 0.15s',
-            }}
-            onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--primary)')}
-            onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
-          >
-            Sign out
-          </button>
-        </div>
-      </header>
+      <AppHeader />
 
       {/* Content */}
       <main className="animate-fade-down" style={{ maxWidth: 780, margin: '0 auto', padding: '48px 24px 80px' }}>
@@ -156,7 +81,7 @@ export default function Dashboard() {
             marginBottom: 40,
           }}
         >
-          Welcome back{user?.email ? `, ${user.email.split('@')[0]}` : ''}. Manage the projects Sentinel is watching.
+          Welcome back{profile?.username ? `, ${profile.username}` : ''}. Manage the projects Sentinel is watching.
         </p>
 
         {/* Projects section header */}

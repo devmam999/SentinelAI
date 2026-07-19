@@ -1,12 +1,13 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
+import { resolveLoginEmail } from '../lib/profile'
 import AuthLayout from '../components/AuthLayout'
 import * as s from '../components/authStyles'
 
 export default function Login() {
   const navigate = useNavigate()
-  const [email, setEmail] = useState('')
+  const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -20,12 +21,24 @@ export default function Login() {
       return
     }
 
+    if (!identifier.trim()) {
+      setError('Enter your username or email.')
+      return
+    }
+
     setLoading(true)
+    const email = await resolveLoginEmail(identifier)
+    if (!email) {
+      setLoading(false)
+      setError('Invalid username or email.')
+      return
+    }
+
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     setLoading(false)
 
     if (error) {
-      setError(error.message)
+      setError('Invalid username/email or password.')
       return
     }
     navigate('/dashboard')
@@ -44,20 +57,19 @@ export default function Login() {
         </>
       }
     >
-      <form onSubmit={handleSubmit}>
+      <form onSubmit={handleSubmit} noValidate>
         {error && <div style={s.errorBox}>{error}</div>}
 
         <div style={{ marginBottom: 18 }}>
-          <label htmlFor="email" style={s.label}>
-            Email
+          <label htmlFor="identifier" style={s.label}>
+            Username / email
           </label>
           <input
-            id="email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@company.com"
-            required
+            id="identifier"
+            type="text"
+            value={identifier}
+            onChange={(e) => setIdentifier(e.target.value)}
+            placeholder="you@company.com or yourname"
             style={s.input}
             onFocus={(e) => (e.target.style.borderColor = 'var(--primary)')}
             onBlur={(e) => (e.target.style.borderColor = 'var(--border)')}

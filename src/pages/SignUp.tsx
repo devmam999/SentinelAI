@@ -4,15 +4,28 @@ import AuthLayout from '../components/AuthLayout'
 import PasswordRequirements from '../components/PasswordRequirements'
 import * as s from '../components/authStyles'
 import { isPasswordValid } from '../lib/passwordValidation'
+import { isUsernameAvailable } from '../lib/profile'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
+import { USERNAME_MAX_LENGTH, validateUsername } from '../lib/usernameValidation'
 
 export default function SignUp() {
   const navigate = useNavigate()
+  const [username, setUsername] = useState('')
+  const [usernameError, setUsernameError] = useState<string | null>(null)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+
+  const handleUsernameChange = (value: string) => {
+    setUsername(value)
+    if (!value) {
+      setUsernameError(null)
+      return
+    }
+    setUsernameError(validateUsername(value))
+  }
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -24,13 +37,33 @@ export default function SignUp() {
       return
     }
 
+    const usernameValidationError = validateUsername(username)
+    if (usernameValidationError) {
+      setUsernameError(usernameValidationError)
+      setError(usernameValidationError)
+      return
+    }
+
     if (!isPasswordValid(password)) {
       setError('Please meet all password requirements before signing up.')
       return
     }
 
     setLoading(true)
-    const { data, error } = await supabase.auth.signUp({ email, password })
+    const available = await isUsernameAvailable(username)
+    if (!available) {
+      setLoading(false)
+      setError('That username is already taken.')
+      return
+    }
+
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { username: username.trim() },
+      },
+    })
     setLoading(false)
 
     if (error) {
@@ -54,6 +87,8 @@ export default function SignUp() {
     }
   }
 
+  const canSubmit = !loading && !usernameError && Boolean(username.trim()) && isPasswordValid(password)
+
   return (
     <AuthLayout
       title="Create your account"
@@ -67,9 +102,45 @@ export default function SignUp() {
         </>
       }
     >
-      <form onSubmit={handleSubmit}>
+      <form onSubmit={handleSubmit} noValidate>
         {error && <div style={s.errorBox}>{error}</div>}
         {notice && <div style={s.successBox}>{notice}</div>}
+
+        <div style={{ marginBottom: 18 }}>
+          <label htmlFor="username" style={s.label}>
+            Username
+          </label>
+          <input
+            id="username"
+            type="text"
+            value={username}
+            onChange={(e) => handleUsernameChange(e.target.value)}
+            placeholder="yourname"
+            maxLength={USERNAME_MAX_LENGTH}
+            style={{
+              ...s.input,
+              borderColor: usernameError ? 'rgba(255, 95, 95, 0.45)' : 'var(--border)',
+            }}
+            onFocus={(e) => {
+              if (!usernameError) e.target.style.borderColor = 'var(--primary)'
+            }}
+            onBlur={(e) => {
+              e.target.style.borderColor = usernameError ? 'rgba(255, 95, 95, 0.45)' : 'var(--border)'
+            }}
+          />
+          {usernameError && (
+            <p
+              style={{
+                marginTop: 8,
+                fontFamily: 'var(--font-inter)',
+                fontSize: '0.78rem',
+                color: '#ff8a8a',
+              }}
+            >
+              {usernameError}
+            </p>
+          )}
+        </div>
 
         <div style={{ marginBottom: 18 }}>
           <label htmlFor="email" style={s.label}>
@@ -108,10 +179,10 @@ export default function SignUp() {
 
         <button
           type="submit"
-          disabled={loading || !isPasswordValid(password)}
-          style={{ ...s.primaryButton, padding: '11px 16px', opacity: loading ? 0.6 : 1, cursor: loading ? 'default' : 'pointer' }}
-          onMouseEnter={(e) => !loading && (e.currentTarget.style.opacity = '0.85')}
-          onMouseLeave={(e) => !loading && (e.currentTarget.style.opacity = '1')}
+          disabled={!canSubmit}
+          style={{ ...s.primaryButton, padding: '11px 16px', opacity: !canSubmit ? 0.6 : 1, cursor: !canSubmit ? 'default' : 'pointer' }}
+          onMouseEnter={(e) => canSubmit && (e.currentTarget.style.opacity = '0.85')}
+          onMouseLeave={(e) => canSubmit && (e.currentTarget.style.opacity = '1')}
         >
           {loading ? 'Creating account…' : 'Sign up'}
         </button>
