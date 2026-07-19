@@ -30,8 +30,8 @@ Next Steps:            Rollback deployment, Restart auth service
 Alert ─▶ FastAPI backend
              │
              ├─▶ GitHub API      → recent commits + deployments (find the bad change)
-             ├─▶ ChromaDB        → semantic search over your runbooks
-             ├─▶ Gemini          → root-cause analysis + remediation plan
+             ├─▶ ChromaDB        → semantic search over your runbooks (Gemini embeddings)
+             ├─▶ Gemini Flash    → structured root-cause analysis + remediation plan
              └─▶ Slack Webhook   → formatted incident report in your channel
 ```
 
@@ -45,6 +45,23 @@ dedicated volume.
 **Recommended production layout:** frontend on **Vercel**, backend on **Render**
 (or any Docker host with a persistent volume). The backend is not a good fit for
 serverless-only deploys because ChromaDB needs durable disk.
+
+### Gemini models (two roles, one API key)
+
+SentinelAI uses **two different Gemini models**, both via the same
+`GEMINI_API_KEY`:
+
+| Model (default) | Role | Used for |
+| --------------- | ---- | -------- |
+| **`gemini-embedding-001`** | Embeddings | Indexing runbooks in ChromaDB, semantic runbook search, and upload validation (checking the four required sections) |
+| **`gemini-2.5-flash`** | Generation | Structured incident analysis (likely cause, confidence, next steps, Slack report) |
+
+Override either default in `backend/.env.local`:
+
+```env
+GEMINI_EMBEDDING_MODEL=gemini-embedding-001
+GEMINI_MODEL=gemini-2.5-flash
+```
 
 ---
 
@@ -219,6 +236,9 @@ consistent everywhere. Indexed runbooks persist in the **`chroma-data`** volume.
    GITHUB_TOKEN=your-github-pat
    SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ   # optional fallback
    FRONTEND_URL=http://localhost:8443                               # production: your Vercel URL
+   # Optional Gemini model overrides (defaults shown):
+   # GEMINI_EMBEDDING_MODEL=gemini-embedding-001   # runbook vectors + validation
+   # GEMINI_MODEL=gemini-2.5-flash                 # incident analysis
    ```
 
 2. Build and start:
@@ -264,7 +284,9 @@ CORS. The app also allows `https://*.vercel.app` preview URLs.
 
 | Variable | Required | Purpose |
 | -------- | -------- | ------- |
-| `GEMINI_API_KEY` | yes | Analysis + runbook embeddings |
+| `GEMINI_API_KEY` | yes | Powers both Gemini models below |
+| `GEMINI_EMBEDDING_MODEL` | optional | Runbook embeddings + validation (default `gemini-embedding-001`) |
+| `GEMINI_MODEL` | optional | Incident analysis (default `gemini-2.5-flash`) |
 | `GITHUB_TOKEN` | rec. | Rate limits; private repos |
 | `SLACK_WEBHOOK_URL` | optional | Global fallback webhook |
 | `FRONTEND_URL` | prod. | CORS allowlist for your frontend |
