@@ -252,8 +252,8 @@ database**, and **runbook file storage**.
    | Section | What it sets up |
    | ------- | ---------------- |
    | 1–2 | `profiles` table (with **username**), Row Level Security |
-   | 3 | Trigger: auto-create profile on signup (reads `username` from auth metadata) |
-   | 4 | Backfill profiles for existing auth users |
+   | 3 | Triggers: create `profiles` row **only after email confirmation** |
+   | 4 | Backfill confirmed users; remove unconfirmed profile rows |
    | 5 | **`projects` table** + RLS |
    | 6 | **`runbooks` private storage bucket** + per-user policies |
    | RPCs | `resolve_login_email`, `is_username_available`, `update_username`, `delete_own_account` |
@@ -304,8 +304,9 @@ variables only).
 
 | Area | Behavior |
 | ---- | -------- |
-| **Sign up** | Username (required), email, password with live strength meter and requirement checklist (8+ chars, symbol, upper, lower, number) |
-| **Log in** | **Username or email** + password |
+| **Sign up** | Username (required), email, password with live strength meter; if email exists but unverified, resends confirmation instead of “try logging in” |
+| **Log in** | **Username or email** + password; blocked until email is verified (resend link offered) |
+| **Verify email** | `/verify-email` — resend confirmation or sign out; dashboard and protected routes require verified email |
 | **Dashboard** | Shows **username** (not email) in the header; **Settings** + red **Sign out** |
 | **Settings** | Change username (instant), email (confirmation to new address), password (new + confirm); delete account via `sudo delete [username]` modal |
 | **Projects** | Create/edit with GitHub repo, Slack webhook ([get one from Slack apps](https://api.slack.com/apps)), runbooks |
@@ -362,19 +363,35 @@ docker compose down -v           # stop and wipe indexed runbooks
 
 ### Supabase auth URLs (fixes email verification on production)
 
-If confirmation emails link to `localhost`, links will fail for deployed users.
-Configure **Authentication → URL Configuration** in the Supabase dashboard:
+**If the confirmation link opens `localhost:3000`, that is a Supabase dashboard
+setting — not your Vercel app.** Supabase defaults Site URL to
+`http://localhost:3000`. Our app runs on port **8443** locally and your **Vercel
+URL** in production.
 
-| Setting | Example |
-| ------- | ------- |
-| **Site URL** | `https://your-app.vercel.app` |
-| **Redirect URLs** | `https://your-app.vercel.app/auth/callback` |
-| | `http://localhost:8443/auth/callback` (local dev) |
-| | `https://*.vercel.app/auth/callback` (optional — preview deploys) |
+Fix in **Supabase → Authentication → URL Configuration**:
 
-The app sends users to `/auth/callback` after signup / email change (`SignUp.tsx`,
-`Settings.tsx`). That route exchanges the Supabase code and sends the user to the
-dashboard.
+| Setting | Change from | Change to |
+| ------- | ----------- | --------- |
+| **Site URL** | `http://localhost:3000` | `https://your-app.vercel.app` |
+| **Redirect URLs** | (add these) | `https://your-app.vercel.app/auth/callback` |
+| | | `http://localhost:8443/auth/callback` |
+| | | `https://*.vercel.app/auth/callback` (optional previews) |
+
+Then **sign up again** (or resend confirmation) — old emails still contain the old
+localhost link.
+
+The app also passes `emailRedirectTo` in code (`SignUp.tsx`, `Settings.tsx`) pointing
+at `/auth/callback` on whatever origin you signed up from.
+
+### Email confirmation and the database
+
+- **Before verify:** Supabase Auth stores a pending row in `auth.users` (required
+  for sending the email). **`public.profiles` is not created yet.**
+- **After verify:** A database trigger (and `/auth/callback`) creates your row in
+  `profiles` with your username. Only then can you use the dashboard.
+
+Re-run the updated [`supabase/schema.sql`](supabase/schema.sql) in the SQL Editor
+to apply the deferred-profile triggers and remove any old unconfirmed profile rows.
 
 ### Vercel
 

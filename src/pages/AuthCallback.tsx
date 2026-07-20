@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { ensureUserProfile } from '../lib/profile'
+import { isEmailVerified } from '../lib/auth'
 
 export default function AuthCallback() {
   const navigate = useNavigate()
@@ -20,6 +22,12 @@ export default function AuthCallback() {
           setError(exchangeError.message)
           return
         }
+        await ensureUserProfile()
+        const { data: sessionData } = await supabase.auth.getSession()
+        if (sessionData.session?.user && !isEmailVerified(sessionData.session.user)) {
+          navigate('/verify-email', { replace: true })
+          return
+        }
         navigate('/dashboard', { replace: true })
         return
       }
@@ -33,6 +41,11 @@ export default function AuthCallback() {
       }
 
       if (data.session) {
+        await ensureUserProfile()
+        if (!isEmailVerified(data.session.user)) {
+          navigate('/verify-email', { replace: true })
+          return
+        }
         navigate('/dashboard', { replace: true })
         return
       }

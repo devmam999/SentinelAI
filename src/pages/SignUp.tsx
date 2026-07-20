@@ -5,8 +5,10 @@ import PasswordRequirements from '../components/PasswordRequirements'
 import * as s from '../components/authStyles'
 import { isPasswordValid } from '../lib/passwordValidation'
 import { isUsernameAvailable } from '../lib/profile'
+import { resendSignupConfirmation } from '../lib/auth'
 import { getAuthRedirectUrl } from '../lib/siteUrl'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
+import { isEmailVerified } from '../lib/auth'
 import { USERNAME_MAX_LENGTH, validateUsername } from '../lib/usernameValidation'
 
 export default function SignUp() {
@@ -73,19 +75,22 @@ export default function SignUp() {
       return
     }
 
-    // Email-enumeration protection: signing up with an email that already exists
-    // returns a user object with an empty `identities` array (and no error). Detect
-    // it so we don't falsely report success and can point the user to log in.
+    // Email-enumeration protection: existing email returns empty identities.
+    // Resend confirmation in case they signed up but never verified.
     if (data.user && data.user.identities && data.user.identities.length === 0) {
-      setError('An account with this email already exists. Try logging in instead.')
+      await resendSignupConfirmation(email)
+      setNotice(
+        'An account with this email may already exist. If you have not verified your email yet, check your inbox — we sent another confirmation link.',
+      )
       return
     }
 
-    // If email confirmation is enabled, there's no active session yet.
-    if (data.session) {
+    if (data.session && data.user && isEmailVerified(data.user)) {
       navigate('/dashboard')
     } else {
-      setNotice('Check your inbox to confirm your email, then log in.')
+      setNotice(
+        `Check your inbox to confirm your email. Your account is created only after you click the confirmation link.`,
+      )
     }
   }
 

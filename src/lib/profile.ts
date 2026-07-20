@@ -33,3 +33,7 @@ export async function isUsernameAvailable(username: string): Promise<boolean> {
   if (error) return false
   return Boolean(data)
 }
+
+export async function ensureUserProfile(): Promise<void> {
+  await supabase.rpc('ensure_profile')
+}

@@ -9,9 +9,8 @@
 --   1. Creates a `public.profiles` table, one row per authenticated user (with username).
 --   2. Turns on Row Level Security so each user can only see/edit their own row
 --      (this is what makes the publishable/anon key safe to ship in the browser).
---   3. Adds a trigger that auto-inserts a profile row whenever a new user signs
---      up in `auth.users` — so your app never has to create it manually.
---   4. Backfills profiles for any users that already signed up before this ran.
+--   3. Adds a trigger that creates a profile row only after email confirmation.
+--   4. Backfills profiles for confirmed users only.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- 1. Profiles table -----------------------------------------------------------
@@ -53,16 +52,20 @@ create policy "Users can update their own profile"
   on public.profiles for update
   using (auth.uid() = id);
 
--- 3. Auto-create a profile row on signup --------------------------------------
--- `security definer` lets the function insert into a table the signing-up user
--- doesn't have direct rights to yet; the empty search_path is a hardening step.
-create or replace function public.handle_new_user()
+-- 3. Create profile only after email confirmation --------------------------------
+-- Supabase always stores pending signups in auth.users; we only mirror confirmed
+-- users into public.profiles so the app database stays clean until verify.
+create or replace function public.sync_confirmed_user_profile()
 returns trigger
 language plpgsql
 security definer
 set search_path = ''
 as $$
 begin
+  if new.email_confirmed_at is null then
+    return new;
+  end if;
+
   insert into public.profiles (id, email, full_name, username)
   values (
     new.id,
@@ -70,7 +73,11 @@ begin
     new.raw_user_meta_data ->> 'full_name',
     new.raw_user_meta_data ->> 'username'
   )
-  on conflict (id) do nothing;
+  on conflict (id) do update set
+    email = excluded.email,
+    username = coalesce(excluded.username, public.profiles.username),
+    updated_at = now();
+
   return new;
 end;
 $$;
@@ -78,11 +85,65 @@ $$;
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
   after insert on auth.users
-  for each row execute function public.handle_new_user();
+  for each row
+  when (new.email_confirmed_at is not null)
+  execute function public.sync_confirmed_user_profile();
 
--- 4. Backfill existing users --------------------------------------------------
-insert into public.profiles (id, email)
-select id, email from auth.users
+drop trigger if exists on_auth_user_confirmed on auth.users;
+create trigger on_auth_user_confirmed
+  after update of email_confirmed_at on auth.users
+  for each row
+  when (old.email_confirmed_at is null and new.email_confirmed_at is not null)
+  execute function public.sync_confirmed_user_profile();
+
+-- Client-side fallback after /auth/callback (if trigger timing ever races).
+create or replace function public.ensure_profile()
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  uid uuid := auth.uid();
+  u record;
+begin
+  if uid is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select id, email, email_confirmed_at, raw_user_meta_data
+  into u
+  from auth.users
+  where id = uid;
+
+  if u.email_confirmed_at is null then
+    return;
+  end if;
+
+  insert into public.profiles (id, email, full_name, username)
+  values (
+    u.id,
+    u.email,
+    u.raw_user_meta_data ->> 'full_name',
+    u.raw_user_meta_data ->> 'username'
+  )
+  on conflict (id) do update set
+    email = excluded.email,
+    username = coalesce(excluded.username, public.profiles.username),
+    updated_at = now();
+end;
+$$;
+
+-- 4. Backfill confirmed users; drop profiles for unconfirmed -------------------
+delete from public.profiles p
+using auth.users u
+where p.id = u.id
+  and u.email_confirmed_at is null;
+
+insert into public.profiles (id, email, username)
+select id, email, raw_user_meta_data ->> 'username'
+from auth.users
+where email_confirmed_at is not null
 on conflict (id) do nothing;
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -126,6 +187,12 @@ as $$
     select 1
     from public.profiles
     where lower(username) = lower(trim(desired_username))
+  )
+  and not exists (
+    select 1
+    from auth.users u
+    where lower(u.raw_user_meta_data ->> 'username') = lower(trim(desired_username))
+      and u.email_confirmed_at is null
   );
 $$;
 
@@ -189,6 +256,7 @@ $$;
 
 grant execute on function public.resolve_login_email(text) to anon, authenticated;
 grant execute on function public.is_username_available(text) to anon, authenticated;
+grant execute on function public.ensure_profile() to authenticated;
 grant execute on function public.update_username(text, text) to authenticated;
 grant execute on function public.delete_own_account() to authenticated;
 
