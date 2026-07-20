@@ -7,6 +7,7 @@ import * as s from '../components/authStyles'
 import { useAuth } from '../context/AuthContext'
 import { isPasswordValid } from '../lib/passwordValidation'
 import { isUsernameAvailable } from '../lib/profile'
+import { getAuthRedirectUrl } from '../lib/siteUrl'
 import { supabase } from '../lib/supabase'
 import { USERNAME_MAX_LENGTH, validateUsername } from '../lib/usernameValidation'
 
@@ -233,7 +234,10 @@ export default function Settings() {
     }
 
     setEmailLoading(true)
-    const { error } = await supabase.auth.updateUser({ email: emailNew.trim() })
+    const { error } = await supabase.auth.updateUser(
+      { email: emailNew.trim() },
+      { emailRedirectTo: getAuthRedirectUrl('/auth/callback') },
+    )
     setEmailLoading(false)
 
     if (error) {

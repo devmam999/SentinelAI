@@ -1,12 +1,24 @@
 /**
  * Client for the SentinelAI FastAPI backend.
  *
- * The base URL comes from `VITE_API_URL` (see .env.example). It defaults to the
- * local backend so `npm run dev` + `uvicorn` work together out of the box.
+ * Set `VITE_API_URL` to your Render (or other) backend URL in production.
+ * Local dev defaults to http://localhost:8000.
  */
 
-const API_URL =
-  ((import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:8000').replace(/\/$/, '')
+const configuredUrl = (import.meta.env.VITE_API_URL as string | undefined)?.trim()?.replace(/\/$/, '')
+
+export const API_URL = configuredUrl || (import.meta.env.DEV ? 'http://localhost:8000' : '')
+
+export const isApiConfigured = Boolean(API_URL)
+
+function requireApiUrl(): string {
+  if (!API_URL) {
+    throw new Error(
+      'Backend URL is not configured. Set VITE_API_URL to your Render backend URL in Vercel project settings, then redeploy.',
+    )
+  }
+  return API_URL
+}
 
 export type IncidentAnalysis = {
   likely_cause: string
@@ -56,7 +68,7 @@ async function parseError(res: Response): Promise<string> {
 
 /** Run the full incident pipeline: GitHub + runbooks + Gemini, then post to Slack. */
 export async function analyzeIncident(input: AnalyzeInput): Promise<IncidentResponse> {
-  const res = await fetch(`${API_URL}/api/incidents/analyze`, {
+  const res = await fetch(`${requireApiUrl()}/api/incidents/analyze`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -69,7 +81,7 @@ export async function analyzeIncident(input: AnalyzeInput): Promise<IncidentResp
 export async function validateRunbookFile(file: File): Promise<RunbookValidateResult> {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(`${API_URL}/api/runbooks/validate-file`, {
+  const res = await fetch(`${requireApiUrl()}/api/runbooks/validate-file`, {
     method: 'POST',
     body: form,
   })
@@ -88,7 +100,7 @@ export async function indexRunbookFile(
   form.append('title', meta.title)
   if (meta.projectId) form.append('project_id', meta.projectId)
 
-  const res = await fetch(`${API_URL}/api/runbooks/index-file`, {
+  const res = await fetch(`${requireApiUrl()}/api/runbooks/index-file`, {
     method: 'POST',
     body: form,
   })
@@ -102,12 +114,10 @@ export async function indexRunbook(runbook: {
   content: string
   metadata?: Record<string, string>
 }): Promise<void> {
-  const res = await fetch(`${API_URL}/api/runbooks`, {
+  const res = await fetch(`${requireApiUrl()}/api/runbooks`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(runbook),
   })
   if (!res.ok) throw new Error(await parseError(res))
 }
-
-export { API_URL }

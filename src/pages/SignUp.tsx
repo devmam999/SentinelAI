@@ -5,6 +5,7 @@ import PasswordRequirements from '../components/PasswordRequirements'
 import * as s from '../components/authStyles'
 import { isPasswordValid } from '../lib/passwordValidation'
 import { isUsernameAvailable } from '../lib/profile'
+import { getAuthRedirectUrl } from '../lib/siteUrl'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
 import { USERNAME_MAX_LENGTH, validateUsername } from '../lib/usernameValidation'
 
@@ -62,6 +63,7 @@ export default function SignUp() {
       password,
       options: {
         data: { username: username.trim() },
+        emailRedirectTo: getAuthRedirectUrl('/auth/callback'),
       },
     })
     setLoading(false)

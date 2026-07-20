@@ -27,4 +27,12 @@ export const isSupabaseConfigured = Boolean(
 export const supabase = createClient(
   supabaseUrl || 'https://placeholder.supabase.co',
   supabaseKey || 'sb_publishable_placeholder',
+  {
+    auth: {
+      detectSessionInUrl: true,
+      persistSession: true,
+      autoRefreshToken: true,
+      flowType: 'pkce',
+    },
+  },
 )

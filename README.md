@@ -352,16 +352,52 @@ docker compose down -v           # stop and wipe indexed runbooks
 
 ---
 
-## 4. Production deployment (optional)
+## 4. Production deployment (Vercel + Render)
 
-| Service | Role | Notes |
-| ------- | ---- | ----- |
-| **Vercel** | Frontend SPA | Set `VITE_SUPABASE_*` and `VITE_API_URL` in project env vars |
-| **Render** (or similar) | Backend Docker service | Mount/persist Chroma volume; set `GEMINI_API_KEY`, `GITHUB_TOKEN`, `FRONTEND_URL` |
-| **Supabase** | Auth + DB + storage | Run `schema.sql`; enable Email provider |
+| Service | Role | Required env |
+| ------- | ---- | -------------- |
+| **Vercel** | Frontend SPA | `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`, **`VITE_API_URL`** (Render backend URL) |
+| **Render** | Backend Docker | `GEMINI_API_KEY`, `GITHUB_TOKEN`, **`FRONTEND_URL`** (Vercel URL, no trailing slash) |
+| **Supabase** | Auth + DB + storage | Run `schema.sql`; configure auth URLs (below) |
 
-On the backend, **`FRONTEND_URL`** must match your live frontend origin for
-CORS. The app also allows `https://*.vercel.app` preview URLs.
+### Supabase auth URLs (fixes email verification on production)
+
+If confirmation emails link to `localhost`, links will fail for deployed users.
+Configure **Authentication → URL Configuration** in the Supabase dashboard:
+
+| Setting | Example |
+| ------- | ------- |
+| **Site URL** | `https://your-app.vercel.app` |
+| **Redirect URLs** | `https://your-app.vercel.app/auth/callback` |
+| | `http://localhost:8443/auth/callback` (local dev) |
+| | `https://*.vercel.app/auth/callback` (optional — preview deploys) |
+
+The app sends users to `/auth/callback` after signup / email change (`SignUp.tsx`,
+`Settings.tsx`). That route exchanges the Supabase code and sends the user to the
+dashboard.
+
+### Vercel
+
+1. Add env vars above; **`VITE_API_URL` must be your Render URL** (not localhost).
+2. Redeploy after changing env vars (Vite bakes `VITE_*` at build time).
+3. `vercel.json` rewrites all routes to `index.html` so `/auth/callback` and
+   `/dashboard` work on refresh.
+
+### Render
+
+1. Deploy from `backend/Dockerfile`; attach a **persistent disk** at `/app/data/chroma`
+   so indexed runbooks survive restarts.
+2. Set **`FRONTEND_URL=https://your-app.vercel.app`** for CORS (regex also allows
+   `https://*.vercel.app` previews).
+
+### What breaks if misconfigured
+
+| Symptom | Likely cause |
+| ------- | ------------- |
+| Email link opens localhost | Supabase Site URL still localhost; add production redirect URLs |
+| Email confirm lands on 404 | Missing `vercel.json` SPA rewrite or redirect URL not allowlisted |
+| Runbook upload / analyze fails | `VITE_API_URL` unset on Vercel → browser calls localhost |
+| CORS error from frontend | `FRONTEND_URL` missing/wrong on Render |
 
 ---
 
@@ -373,7 +409,7 @@ CORS. The app also allows `https://*.vercel.app` preview URLs.
 | -------- | -------- | ------- |
 | `VITE_SUPABASE_URL` | yes | Supabase project URL |
 | `VITE_SUPABASE_PUBLISHABLE_KEY` | yes | Browser-safe Supabase key |
-| `VITE_API_URL` | recommended | FastAPI base URL (default `http://localhost:8000`) |
+| `VITE_API_URL` | **yes in prod.** | Render backend URL — **required on Vercel**; defaults to `http://localhost:8000` in dev only |
 
 **Backend** (`backend/.env.local`)
 
