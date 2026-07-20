@@ -29,9 +29,9 @@ Next Steps:            Rollback deployment, Restart auth service
 ```
 Alert ─▶ FastAPI backend
              │
-             ├─▶ GitHub API      → recent commits + deployments (find the bad change)
-             ├─▶ ChromaDB        → semantic search over your runbooks (Gemini embeddings)
-             ├─▶ Gemini Flash    → structured root-cause analysis + remediation plan
+             ├─▶ GitHub API      → recent commits + deployments (listed in prompt — not vector search)
+             ├─▶ ChromaDB        → vector search over runbooks only (Gemini embeddings)
+             ├─▶ Gemini Flash    → picks likely bad commit + remediation from combined context
              └─▶ Slack Webhook   → formatted incident report in your channel
 ```
 
@@ -67,27 +67,42 @@ GEMINI_MODEL=gemini-2.5-flash
 
 **RAG** means the LLM **retrieves** relevant documents from your own data, **augments** the prompt with that context, then **generates** an answer grounded in what it found.
 
-SentinelAI uses RAG to tie incident analysis to **your runbooks** (plus GitHub
-history). The pipeline lives in `backend/app/services/incident_service.py` and
-breaks down into four steps:
+In SentinelAI, **RAG applies to runbooks only.** Commits and deployments are
+**not** embedded or vector-searched — they are fetched from the **GitHub REST
+API** and passed to Gemini Flash as a plain list for the model to reason over.
+
+The pipeline lives in `backend/app/services/incident_service.py`:
 
 ```mermaid
-flowchart LR
-  subgraph index [1. Index — at upload / analyze time]
+flowchart TB
+  subgraph index [1. Index — runbooks only]
     RB[Runbook .md / .pdf] --> VAL[Semantic validation]
-    VAL --> EMB1[Gemini embeddings]
-    EMB1 --> CHROMA[(ChromaDB volume)]
+    VAL --> EMB[Gemini embeddings]
+    EMB --> CHROMA[(ChromaDB volume)]
   end
 
-  subgraph query [2–4. At incident time]
-    ALERT[Alert text] --> RET[Vector search top 3 runbooks]
-    CHROMA --> RET
-    GH[GitHub commits + deployments] --> AUG[Build prompt]
-    RET --> AUG
-    AUG --> GEN[Gemini Flash → IncidentAnalysis JSON]
+  subgraph incident [2–4. At incident time]
+    ALERT[Alert text] --> VSEARCH["Vector search (top 3 runbooks)"]
+    CHROMA --> VSEARCH
+
+    GH["GitHub REST API"] --> RECENT["Recent commits (up to 30) + deployments (up to 5)"]
+
+    VSEARCH --> PROMPT[Build prompt]
+    RECENT --> PROMPT
+    PROMPT --> GEN["Gemini Flash → IncidentAnalysis JSON"]
     GEN --> SLACK[Slack report]
   end
 ```
+
+#### Runbooks vs commits — what uses vector search?
+
+| Data | How it is fetched | Vector search? | How the “best” item is chosen |
+| ---- | ------------------- | -------------- | ----------------------------- |
+| **Runbooks** | Indexed in ChromaDB at upload | **Yes** | Alert text is embedded; top 3 runbooks by similarity (`chroma_service.search_runbooks`) |
+| **Commits** | GitHub API — most recent N commits (`github_service.list_recent_commits`, default 30) | **No** | Gemini Flash reads commit messages in the prompt and sets `most_relevant_commit` |
+| **Deployments** | GitHub API — recent deployments (`list_deployments`, limit 5) | **No** | Passed as context; helps Gemini tie the alert to a deployment |
+
+So: **vector search finds relevant runbooks**; **the likely bad commit is inferred by Gemini** from the recent commit list, not from embedding similarity.
 
 #### 1. Index (prepare the knowledge base)
 
@@ -131,9 +146,17 @@ generation step passes the **titles** of the best matches so Gemini can pick a
 #### 4. Generate (structured incident analysis)
 
 **Gemini Flash** (`gemini-2.5-flash`) receives the augmented prompt and returns
-structured JSON mapped to `IncidentAnalysis`: likely cause, confidence, affected
-services, suggested runbook, next steps, and the most relevant commit message.
+structured JSON mapped to `IncidentAnalysis`:
+
+- **`most_relevant_commit`** — chosen by the model from the **listed commit messages** (not vector search)
+- **`suggested_runbook`** — chosen from the **vector-retrieved** runbook titles
+- Plus likely cause, confidence, affected services, and next steps
+
 That output is shown in the UI and optionally posted to Slack.
+
+**Why RAG for runbooks?** Without retrieval, the model would invent runbook names
+and fixes. Vector search grounds `suggested_runbook` in documents you uploaded.
+Commit blame stays a separate step: recent history from GitHub + LLM reasoning.
 
 ---
 
