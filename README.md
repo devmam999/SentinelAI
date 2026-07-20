@@ -63,6 +63,78 @@ GEMINI_EMBEDDING_MODEL=gemini-embedding-001
 GEMINI_MODEL=gemini-2.5-flash
 ```
 
+### RAG (Retrieval-Augmented Generation)
+
+**RAG** means the LLM **retrieves** relevant documents from your own data, **augments** the prompt with that context, then **generates** an answer grounded in what it found.
+
+SentinelAI uses RAG to tie incident analysis to **your runbooks** (plus GitHub
+history). The pipeline lives in `backend/app/services/incident_service.py` and
+breaks down into four steps:
+
+```mermaid
+flowchart LR
+  subgraph index [1. Index — at upload / analyze time]
+    RB[Runbook .md / .pdf] --> VAL[Semantic validation]
+    VAL --> EMB1[Gemini embeddings]
+    EMB1 --> CHROMA[(ChromaDB volume)]
+  end
+
+  subgraph query [2–4. At incident time]
+    ALERT[Alert text] --> RET[Vector search top 3 runbooks]
+    CHROMA --> RET
+    GH[GitHub commits + deployments] --> AUG[Build prompt]
+    RET --> AUG
+    AUG --> GEN[Gemini Flash → IncidentAnalysis JSON]
+    GEN --> SLACK[Slack report]
+  end
+```
+
+#### 1. Index (prepare the knowledge base)
+
+When you upload a runbook or trigger analysis on a project:
+
+1. The backend reads the file (`.md` or `.pdf` via `runbook_validation_service`).
+2. **Validation** — before indexing, Gemini embeddings check that the document
+   semantically covers all four required sections (not just exact headings).
+3. **Embedding** — the full runbook text is embedded with
+   `gemini-embedding-001` and stored in **ChromaDB** (`chroma_service.add_runbook`).
+   Vectors persist on the Docker `chroma-data` volume.
+
+This is the “knowledge base” RAG retrieves from later.
+
+#### 2. Retrieve (find relevant runbooks)
+
+On **Analyze Incident** (`POST /api/incidents/analyze`), the backend builds a
+search query from the alert description (or deployment id, or a default phrase)
+and calls `chroma_service.search_runbooks(query, n=3)`:
+
+- The query is embedded with the **same** embedding model used at index time.
+- ChromaDB returns the **top 3** runbooks by vector similarity (closest meaning,
+  not keyword match).
+
+#### 3. Augment (assemble context for the LLM)
+
+Retrieved runbooks are combined with **GitHub context** (recent commits and
+deployments) into a single prompt in `gemini_service._build_prompt`:
+
+| Context added to the prompt | Source |
+| --------------------------- | ------ |
+| Incident signal (alert text, optional deployment) | User / monitoring |
+| Recent commits | GitHub API |
+| Recent deployments | GitHub API |
+| Candidate runbook titles | Top ChromaDB matches from step 2 |
+
+Semantic search runs against the **full runbook text** in ChromaDB; the
+generation step passes the **titles** of the best matches so Gemini can pick a
+`suggested_runbook` and stay focused.
+
+#### 4. Generate (structured incident analysis)
+
+**Gemini Flash** (`gemini-2.5-flash`) receives the augmented prompt and returns
+structured JSON mapped to `IncidentAnalysis`: likely cause, confidence, affected
+services, suggested runbook, next steps, and the most relevant commit message.
+That output is shown in the UI and optionally posted to Slack.
+
 ---
 
 ## Project structure
