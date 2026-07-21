@@ -14,6 +14,7 @@ const RUNBOOK_REQUIRED_SECTIONS = [
 ] as const
 
 type RunbookFileError = {
+  id: string
   fileName: string
   missingSections: string[]
   isRateLimit?: boolean
@@ -80,7 +81,11 @@ export default function AddProject() {
         if (result.valid) {
           accepted.push(file)
         } else {
-          rejected.push({ fileName: file.name, missingSections: result.missing_sections })
+          rejected.push({
+            id: crypto.randomUUID(),
+            fileName: file.name,
+            missingSections: result.missing_sections,
+          })
         }
       } catch (err) {
         const raw =
@@ -89,6 +94,7 @@ export default function AddProject() {
             : 'Runbook validation failed. Is the backend running?'
         const message = formatApiError(raw)
         rejected.push({
+          id: crypto.randomUUID(),
           fileName: file.name,
           missingSections: [message],
           isRateLimit: isRateLimitError(raw) || isRateLimitError(message),
@@ -116,13 +122,27 @@ export default function AddProject() {
     if (accepted.length) {
       setFiles((prev) => [...prev, ...accepted])
     }
-    setRunbookErrors(rejected)
+    if (rejected.length) {
+      setRunbookErrors((prev) => {
+        const replaced = new Set(rejected.map((r) => r.fileName))
+        return [...prev.filter((e) => !replaced.has(e.fileName)), ...rejected]
+      })
+    }
   }
+
+  const dismissRunbookError = (errorId: string) => {
+    setRunbookErrors((prev) => prev.filter((e) => e.id !== errorId))
+  }
+
+  const hasValidRunbook = existingRunbooks.length + files.length > 0
 
   const removeExisting = (index: number) => setExistingRunbooks((prev) => prev.filter((_, i) => i !== index))
   const removeFile = (index: number) => {
+    const removed = files[index]
     setFiles((prev) => prev.filter((_, i) => i !== index))
-    setRunbookErrors([])
+    if (removed) {
+      setRunbookErrors((prev) => prev.filter((e) => e.fileName !== removed.name))
+    }
   }
 
   const handleSubmit = async (e: FormEvent) => {
@@ -141,11 +161,8 @@ export default function AddProject() {
       setError('Project name, GitHub repo, and Slack webhook are all required.')
       return
     }
-    if (existingRunbooks.length + files.length === 0) {
+    if (!hasValidRunbook) {
       setError('Please upload at least one runbook (.md or .pdf).')
-      return
-    }
-    if (runbookErrors.length > 0) {
       return
     }
 
@@ -154,16 +171,23 @@ export default function AddProject() {
     // Re-validate before upload so stale files cannot slip through.
     const { accepted, rejected } = await validateFiles(files)
     if (rejected.length > 0) {
-      setRunbookErrors(rejected)
+      setRunbookErrors((prev) => {
+        const replaced = new Set(rejected.map((r) => r.fileName))
+        return [...prev.filter((e) => !replaced.has(e.fileName)), ...rejected]
+      })
+    }
+    if (accepted.length + existingRunbooks.length === 0) {
       setFiles(accepted)
       setSaving(false)
       return
     }
 
+    setFiles(accepted)
+    const filesToUpload = accepted
     // Upload any newly selected files to the private "runbooks" storage bucket,
     // under a per-user folder so Storage RLS keeps them isolated per account.
     const uploadedPaths: string[] = []
-    for (const file of files) {
+    for (const file of filesToUpload) {
       const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
       const path = `${user.id}/${crypto.randomUUID()}/${safeName}`
       const { error: uploadError } = await supabase.storage
@@ -426,69 +450,99 @@ export default function AddProject() {
               </ul>
             </div>
 
-            {runbookErrors.length > 0 && (
+            {runbookErrors.map((item) => (
               <div
+                key={item.id}
                 style={{
+                  position: 'relative',
                   marginBottom: 14,
                   background: '#c62828',
                   color: '#ffffff',
                   borderRadius: 8,
-                  padding: '14px 16px',
+                  padding: '14px 40px 14px 16px',
                 }}
               >
-                {runbookErrors.map((item) => (
-                  <div key={item.fileName} style={{ marginBottom: runbookErrors.length > 1 ? 14 : 0 }}>
-                    {item.isRateLimit ? (
-                      <div
-                        style={{
-                          fontFamily: 'var(--font-inter)',
-                          fontSize: '0.88rem',
-                          lineHeight: 1.5,
-                        }}
-                      >
-                        {item.missingSections[0]}
-                      </div>
-                    ) : (
-                      <>
-                        <div
+                <button
+                  type="button"
+                  aria-label={`Dismiss error for ${item.fileName}`}
+                  title="Dismiss"
+                  onClick={() => dismissRunbookError(item.id)}
+                  style={{
+                    position: 'absolute',
+                    top: 10,
+                    right: 10,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: 24,
+                    height: 24,
+                    color: '#ffffff',
+                    background: 'rgba(255,255,255,0.12)',
+                    border: 'none',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                    transition: 'background 0.15s',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = 'rgba(255,255,255,0.22)'
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'rgba(255,255,255,0.12)'
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                    <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                </button>
+                {item.isRateLimit ? (
+                  <div
+                    style={{
+                      fontFamily: 'var(--font-inter)',
+                      fontSize: '0.88rem',
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    {item.missingSections[0]}
+                  </div>
+                ) : (
+                  <>
+                    <div
+                      style={{
+                        fontFamily: 'var(--font-inter)',
+                        fontSize: '0.88rem',
+                        fontWeight: 700,
+                        marginBottom: 8,
+                      }}
+                    >
+                      {item.fileName} is missing required sections:
+                    </div>
+                    <ul
+                      style={{
+                        margin: 0,
+                        paddingLeft: 18,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                        listStyleType: 'disc',
+                      }}
+                    >
+                      {item.missingSections.map((section) => (
+                        <li
+                          key={section}
                           style={{
                             fontFamily: 'var(--font-inter)',
-                            fontSize: '0.88rem',
-                            fontWeight: 700,
-                            marginBottom: 8,
+                            fontSize: '0.84rem',
+                            lineHeight: 1.45,
                           }}
                         >
-                          {item.fileName} is missing required sections:
-                        </div>
-                        <ul
-                          style={{
-                            margin: 0,
-                            paddingLeft: 18,
-                            display: 'flex',
-                            flexDirection: 'column',
-                            gap: 6,
-                            listStyleType: 'disc',
-                          }}
-                        >
-                          {item.missingSections.map((section) => (
-                            <li
-                              key={section}
-                              style={{
-                                fontFamily: 'var(--font-inter)',
-                                fontSize: '0.84rem',
-                                lineHeight: 1.45,
-                              }}
-                            >
-                              {section}
-                            </li>
-                          ))}
-                        </ul>
-                      </>
-                    )}
-                  </div>
-                ))}
+                          {section}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
               </div>
-            )}
+            ))}
 
             {validatingRunbooks && (
               <div
@@ -562,7 +616,7 @@ export default function AddProject() {
           <div style={{ display: 'flex', gap: 10 }}>
             <button
               type="submit"
-              disabled={saving || validatingRunbooks || runbookErrors.length > 0}
+              disabled={saving || validatingRunbooks || !hasValidRunbook}
               style={{
                 ...s.primaryButton,
                 width: 'auto',
