@@ -159,8 +159,14 @@ export default function Hero() {
           >
             Get started for free
           </button>
-          <button
+          <a
+            href="https://youtu.be/ONSMPDNs6eI"
+            target="_blank"
+            rel="noopener noreferrer"
             style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
               fontFamily: 'var(--font-inter)',
               fontWeight: 600,
               fontSize: '0.95rem',
@@ -171,6 +177,7 @@ export default function Hero() {
               padding: '14px 32px',
               borderRadius: 4,
               letterSpacing: '-0.01em',
+              textDecoration: 'none',
               transition: 'border-color 0.15s, transform 0.15s',
             }}
             onMouseEnter={(e) => {
@@ -182,8 +189,8 @@ export default function Hero() {
               e.currentTarget.style.transform = 'translateY(0)'
             }}
           >
-            Watch 2-min demo →
-          </button>
+            Quick Demo →
+          </a>
         </div>
 
         {/* Terminal */}
