@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { supabase } from '../lib/supabase'
-import { ensureUserProfile } from '../lib/profile'
+import { completeAuthFromUrl } from '../lib/authCallback'
 import { isEmailVerified } from '../lib/auth'
+import { ensureUserProfile } from '../lib/profile'
+import { supabase } from '../lib/supabase'
 
 export default function AuthCallback() {
   const navigate = useNavigate()
@@ -12,23 +13,11 @@ export default function AuthCallback() {
     let active = true
 
     async function finishAuth() {
-      const params = new URLSearchParams(window.location.search)
-      const code = params.get('code')
+      const { error: callbackError } = await completeAuthFromUrl()
+      if (!active) return
 
-      if (code) {
-        const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code)
-        if (!active) return
-        if (exchangeError) {
-          setError(exchangeError.message)
-          return
-        }
-        await ensureUserProfile()
-        const { data: sessionData } = await supabase.auth.getSession()
-        if (sessionData.session?.user && !isEmailVerified(sessionData.session.user)) {
-          navigate('/verify-email', { replace: true })
-          return
-        }
-        navigate('/dashboard', { replace: true })
+      if (callbackError) {
+        setError(callbackError)
         return
       }
 

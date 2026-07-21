@@ -32,7 +32,9 @@ export const supabase = createClient(
       detectSessionInUrl: true,
       persistSession: true,
       autoRefreshToken: true,
-      flowType: 'pkce',
+      // Implicit flow so email confirmation links work when opened from the inbox
+      // (PKCE requires the code verifier from the original sign-up tab).
+      flowType: 'implicit',
     },
   },
 )

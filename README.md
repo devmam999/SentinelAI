@@ -390,6 +390,18 @@ at `/auth/callback` on whatever origin you signed up from.
 - **After verify:** A database trigger (and `/auth/callback`) creates your row in
   `profiles` with your username. Only then can you use the dashboard.
 
+**Email template (recommended):** In **Supabase → Authentication → Email Templates →
+Confirm signup**, replace the default link with a direct app callback so confirmation
+works when opened from any browser or device (avoids PKCE “code verifier not found”):
+
+```html
+<h2>Confirm your signup</h2>
+<p><a href="{{ .SiteURL }}/auth/callback?token_hash={{ .TokenHash }}&type=signup">Confirm your email</a></p>
+```
+
+Set **Site URL** to your production Vercel URL. After changing the template, **sign up
+again** or use **Resend confirmation email** so new links use the updated format.
+
 Re-run the updated [`supabase/schema.sql`](supabase/schema.sql) in the SQL Editor
 to apply the deferred-profile triggers and remove any old unconfirmed profile rows.
 
@@ -413,6 +425,7 @@ to apply the deferred-profile triggers and remove any old unconfirmed profile ro
 | ------- | ------------- |
 | Email link opens localhost | Supabase Site URL still localhost; add production redirect URLs |
 | Email confirm lands on 404 | Missing `vercel.json` SPA rewrite or redirect URL not allowlisted |
+| PKCE code verifier not found | Update the Confirm signup email template (see above) and resend confirmation |
 | Runbook upload / analyze fails | `VITE_API_URL` unset on Vercel → browser calls localhost |
 | CORS error from frontend | `FRONTEND_URL` missing/wrong on Render |
 
