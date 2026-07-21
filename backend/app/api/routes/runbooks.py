@@ -10,8 +10,15 @@ from ...models.schemas import (
     RunbookValidateResponse,
 )
 from ...services import chroma_service, runbook_validation_service
+from ...services.gemini_errors import format_rate_limit_message, is_rate_limit_error
 
 router = APIRouter(prefix="/api/runbooks", tags=["runbooks"])
+
+
+def _raise_runbook_error(action: str, exc: Exception) -> None:
+    if is_rate_limit_error(exc):
+        raise HTTPException(status_code=429, detail=format_rate_limit_message(exc)) from exc
+    raise HTTPException(status_code=400, detail=f"Could not {action} runbook: {exc}") from exc
 
 
 def _runbook_title(filename: str, title: str | None) -> str:
@@ -30,6 +37,10 @@ async def validate(body: RunbookValidateRequest) -> RunbookValidateResponse:
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        if is_rate_limit_error(exc):
+            raise HTTPException(status_code=429, detail=format_rate_limit_message(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return RunbookValidateResponse(valid=len(missing) == 0, missing_sections=missing)
 
@@ -49,7 +60,7 @@ async def validate_file(file: UploadFile = File(...)) -> RunbookValidateResponse
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not read runbook: {exc}") from exc
+        _raise_runbook_error("read", exc)
 
     return RunbookValidateResponse(valid=len(missing) == 0, missing_sections=missing)
 
@@ -81,7 +92,7 @@ async def index_file(
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not index runbook: {exc}") from exc
+        _raise_runbook_error("index", exc)
 
     return {"status": "indexed", "id": runbook_id}
 
@@ -104,3 +115,7 @@ async def search(
         return await run_in_threadpool(chroma_service.search_runbooks, q, n)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        if is_rate_limit_error(exc):
+            raise HTTPException(status_code=429, detail=format_rate_limit_message(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

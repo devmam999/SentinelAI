@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ...models.schemas import IncidentAnalysis, IncidentRequest, IncidentResponse
 from ...services import incident_service, slack_service
+from ...services.gemini_errors import format_rate_limit_message, is_rate_limit_error
 
 router = APIRouter(prefix="/api/incidents", tags=["incidents"])
 
@@ -35,6 +36,10 @@ async def analyze(request: IncidentRequest) -> IncidentResponse:
             status_code=502,
             detail=f"Upstream error: {exc.response.text}",
         ) from exc
+    except Exception as exc:
+        if is_rate_limit_error(exc):
+            raise HTTPException(status_code=429, detail=format_rate_limit_message(exc)) from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/notify")

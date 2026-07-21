@@ -3,6 +3,7 @@ import { useNavigate, useParams, Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
 import { validateRunbookFile } from '../lib/api'
+import { formatApiError, isRateLimitError } from '../lib/formatApiError'
 import * as s from '../components/authStyles'
 
 const RUNBOOK_REQUIRED_SECTIONS = [
@@ -15,6 +16,7 @@ const RUNBOOK_REQUIRED_SECTIONS = [
 type RunbookFileError = {
   fileName: string
   missingSections: string[]
+  isRateLimit?: boolean
 }
 
 export default function AddProject() {
@@ -81,13 +83,15 @@ export default function AddProject() {
           rejected.push({ fileName: file.name, missingSections: result.missing_sections })
         }
       } catch (err) {
+        const raw =
+          err instanceof Error
+            ? err.message
+            : 'Runbook validation failed. Is the backend running?'
+        const message = formatApiError(raw)
         rejected.push({
           fileName: file.name,
-          missingSections: [
-            err instanceof Error
-              ? err.message
-              : 'Runbook validation failed. Is the backend running?',
-          ],
+          missingSections: [message],
+          isRateLimit: isRateLimitError(raw) || isRateLimitError(message),
         })
       }
     }
@@ -434,39 +438,53 @@ export default function AddProject() {
               >
                 {runbookErrors.map((item) => (
                   <div key={item.fileName} style={{ marginBottom: runbookErrors.length > 1 ? 14 : 0 }}>
-                    <div
-                      style={{
-                        fontFamily: 'var(--font-inter)',
-                        fontSize: '0.88rem',
-                        fontWeight: 700,
-                        marginBottom: 8,
-                      }}
-                    >
-                      {item.fileName} is missing required sections:
-                    </div>
-                    <ul
-                      style={{
-                        margin: 0,
-                        paddingLeft: 18,
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 6,
-                        listStyleType: 'disc',
-                      }}
-                    >
-                      {item.missingSections.map((section) => (
-                        <li
-                          key={section}
+                    {item.isRateLimit ? (
+                      <div
+                        style={{
+                          fontFamily: 'var(--font-inter)',
+                          fontSize: '0.88rem',
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        {item.missingSections[0]}
+                      </div>
+                    ) : (
+                      <>
+                        <div
                           style={{
                             fontFamily: 'var(--font-inter)',
-                            fontSize: '0.84rem',
-                            lineHeight: 1.45,
+                            fontSize: '0.88rem',
+                            fontWeight: 700,
+                            marginBottom: 8,
                           }}
                         >
-                          {section}
-                        </li>
-                      ))}
-                    </ul>
+                          {item.fileName} is missing required sections:
+                        </div>
+                        <ul
+                          style={{
+                            margin: 0,
+                            paddingLeft: 18,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 6,
+                            listStyleType: 'disc',
+                          }}
+                        >
+                          {item.missingSections.map((section) => (
+                            <li
+                              key={section}
+                              style={{
+                                fontFamily: 'var(--font-inter)',
+                                fontSize: '0.84rem',
+                                lineHeight: 1.45,
+                              }}
+                            >
+                              {section}
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
                   </div>
                 ))}
               </div>

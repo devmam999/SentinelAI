@@ -5,6 +5,8 @@
  * Local dev defaults to http://localhost:8000.
  */
 
+import { formatApiError } from './formatApiError'
+
 const configuredUrl = (import.meta.env.VITE_API_URL as string | undefined)?.trim()?.replace(/\/$/, '')
 
 export const API_URL = configuredUrl || (import.meta.env.DEV ? 'http://localhost:8000' : '')
@@ -59,9 +61,12 @@ export type AnalyzeInput = {
 async function parseError(res: Response): Promise<string> {
   try {
     const body = await res.json()
-    if (typeof body?.detail === 'string') return body.detail
+    if (typeof body?.detail === 'string') return formatApiError(body.detail)
   } catch {
     // fall through to status text
+  }
+  if (res.status === 429) {
+    return formatApiError(`429 RESOURCE_EXHAUSTED ${res.statusText}`)
   }
   return `Request failed (${res.status} ${res.statusText})`
 }
