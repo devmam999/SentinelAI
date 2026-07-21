@@ -1,7 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
 import type { Session, User } from '@supabase/supabase-js'
+import { isEmailVerified } from '../lib/auth'
 import { fetchUserProfile, ensureUserProfile, type UserProfile } from '../lib/profile'
 import { supabase } from '../lib/supabase'
+
+const UNVERIFIED_SESSION_PATHS = new Set(['/verify-email', '/auth/callback', '/signup'])
+
+function shouldKeepUnverifiedSession(): boolean {
+  return UNVERIFIED_SESSION_PATHS.has(window.location.pathname)
+}
 
 type AuthContextValue = {
   session: Session | null
@@ -30,14 +37,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [session?.user])
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session)
+    supabase.auth.getSession().then(async ({ data }) => {
+      const nextSession = data.session
+      if (nextSession?.user && !isEmailVerified(nextSession.user) && !shouldKeepUnverifiedSession()) {
+        await supabase.auth.signOut()
+        setSession(null)
+      } else {
+        setSession(nextSession)
+      }
       setLoading(false)
     })
 
     const { data: subscription } = supabase.auth.onAuthStateChange(async (event, newSession) => {
+      if (newSession?.user && !isEmailVerified(newSession.user) && !shouldKeepUnverifiedSession()) {
+        await supabase.auth.signOut()
+        setSession(null)
+        return
+      }
+
       setSession(newSession)
-      if (event === 'SIGNED_IN' && newSession?.user) {
+      if (event === 'SIGNED_IN' && newSession?.user && isEmailVerified(newSession.user)) {
         await ensureUserProfile()
       }
     })

@@ -1,13 +1,20 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
 import { resolveLoginEmail } from '../lib/profile'
-import { isEmailVerified, resendSignupConfirmation } from '../lib/auth'
+import {
+  isEmailVerified,
+  isUnverifiedEmailAuthError,
+  resendSignupConfirmation,
+  UNVERIFIED_EMAIL_MESSAGE,
+} from '../lib/auth'
+import { useAuth } from '../context/AuthContext'
 import AuthLayout from '../components/AuthLayout'
 import * as s from '../components/authStyles'
 
 export default function Login() {
   const navigate = useNavigate()
+  const { session } = useAuth()
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -15,6 +22,21 @@ export default function Login() {
   const [loading, setLoading] = useState(false)
   const [resendEmail, setResendEmail] = useState<string | null>(null)
   const [resending, setResending] = useState(false)
+
+  useEffect(() => {
+    if (!session?.user) return
+
+    if (isEmailVerified(session.user)) {
+      navigate('/dashboard', { replace: true })
+      return
+    }
+
+    const email = session.user.email ?? null
+    void supabase.auth.signOut().then(() => {
+      setResendEmail(email)
+      setError(UNVERIFIED_EMAIL_MESSAGE)
+    })
+  }, [session, navigate])
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -40,18 +62,32 @@ export default function Login() {
       return
     }
 
-    const { data, error: signInError } = await supabase.auth.signInWithPassword({ email, password })
-    setLoading(false)
+    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password })
 
     if (signInError) {
+      setLoading(false)
+      if (isUnverifiedEmailAuthError(signInError)) {
+        setResendEmail(email)
+        setError(UNVERIFIED_EMAIL_MESSAGE)
+        return
+      }
       setError('Invalid username/email or password.')
       return
     }
 
-    if (data.user && !isEmailVerified(data.user)) {
+    const { data: userData, error: userError } = await supabase.auth.getUser()
+    setLoading(false)
+
+    if (userError || !userData.user) {
+      await supabase.auth.signOut()
+      setError('Could not complete login. Please try again.')
+      return
+    }
+
+    if (!isEmailVerified(userData.user)) {
       setResendEmail(email)
       await supabase.auth.signOut()
-      setError('Verify your email before logging in. Check your inbox for the confirmation link.')
+      setError(UNVERIFIED_EMAIL_MESSAGE)
       return
     }
 
