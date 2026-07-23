@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
 import { validateRunbookFile } from '../lib/api'
 import { formatApiError, isRateLimitError } from '../lib/formatApiError'
+import { getMyProjectRole, requestProjectEdit, type ProjectRole } from '../lib/projectTeam'
 import * as s from '../components/authStyles'
 
 const RUNBOOK_REQUIRED_SECTIONS = [
@@ -37,19 +38,29 @@ export default function AddProject() {
   const [runbookErrors, setRunbookErrors] = useState<RunbookFileError[]>([])
   const [validatingRunbooks, setValidatingRunbooks] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [myRole, setMyRole] = useState<ProjectRole | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   // When editing, load the existing project's values before showing the form.
   const [initializing, setInitializing] = useState(isEditing)
+
+  const isAdminRequest = isEditing && myRole === 'admin'
 
   useEffect(() => {
     if (!id) return
     let active = true
 
     async function loadProject() {
-      const { data, error } = await supabase.from('projects').select('*').eq('id', id).single()
+      const [{ data, error }, role] = await Promise.all([
+        supabase.from('projects').select('*').eq('id', id).single(),
+        getMyProjectRole(id!),
+      ])
       if (!active) return
       if (error) {
         setError(error.message)
+      } else if (role !== 'owner' && role !== 'admin') {
+        setError('You do not have permission to edit this project.')
       } else if (data) {
+        setMyRole(role)
         setName(data.name ?? '')
         setGithubRepo(data.github_repo ?? '')
         setSlackWebhook(data.slack_webhook ?? '')
@@ -148,6 +159,7 @@ export default function AddProject() {
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setError(null)
+    setNotice(null)
 
     if (!isSupabaseConfigured) {
       setError('Supabase is not configured yet. Add your credentials to .env.local and restart the dev server.')
@@ -163,6 +175,24 @@ export default function AddProject() {
     }
     if (!hasValidRunbook) {
       setError('Please upload at least one runbook (.md or .pdf).')
+      return
+    }
+
+    if (isAdminRequest && id) {
+      setSaving(true)
+      const { error: requestError } = await requestProjectEdit({
+        projectId: id,
+        name: name.trim(),
+        githubRepo: githubRepo.trim(),
+        slackWebhook: slackWebhook.trim(),
+        runbooks: [...existingRunbooks].join('\n') || null,
+      })
+      setSaving(false)
+      if (requestError) {
+        setError(requestError)
+        return
+      }
+      navigate(`/project/${id}`)
       return
     }
 
@@ -295,7 +325,7 @@ export default function AddProject() {
             marginBottom: 8,
           }}
         >
-          {isEditing ? 'Edit project' : 'New project'}
+          {isEditing ? (isAdminRequest ? 'Request project edit' : 'Edit project') : 'New project'}
         </h1>
         <p
           style={{
@@ -305,7 +335,9 @@ export default function AddProject() {
             marginBottom: 34,
           }}
         >
-          Connect a service for Sentinel to watch. All fields are required.
+          {isAdminRequest
+            ? 'Submit your proposed changes. The project owner must approve them before they take effect.'
+            : 'Connect a service for Sentinel to watch. All fields are required.'}
         </p>
 
         {initializing ? (
@@ -325,6 +357,7 @@ export default function AddProject() {
         ) : (
         <form onSubmit={handleSubmit}>
           {error && <div style={s.errorBox}>{error}</div>}
+          {notice && <div style={s.successBox}>{notice}</div>}
 
           <div style={{ marginBottom: 20 }}>
             <label htmlFor="name" style={s.label}>
@@ -557,7 +590,27 @@ export default function AddProject() {
               </div>
             )}
 
+            {isAdminRequest && (
+              <div
+                style={{
+                  marginBottom: 14,
+                  fontFamily: 'var(--font-inter)',
+                  fontSize: '0.82rem',
+                  lineHeight: 1.5,
+                  color: 'var(--muted-foreground)',
+                  background: 'rgba(240,192,64,0.08)',
+                  border: '1px solid rgba(240,192,64,0.22)',
+                  borderRadius: 8,
+                  padding: '12px 14px',
+                }}
+              >
+                Admins cannot upload new runbooks here. Ask the owner to add files if needed.
+              </div>
+            )}
+
             {/* Upload dropzone */}
+            {!isAdminRequest && (
+              <>
             <label
               htmlFor="runbook-files"
               style={{
@@ -599,6 +652,8 @@ export default function AddProject() {
               }}
               style={{ display: 'none' }}
             />
+              </>
+            )}
 
             {/* Selected / existing files */}
             {(existingRunbooks.length > 0 || files.length > 0) && (
@@ -626,7 +681,13 @@ export default function AddProject() {
               onMouseEnter={(e) => !saving && (e.currentTarget.style.opacity = '0.85')}
               onMouseLeave={(e) => !saving && (e.currentTarget.style.opacity = '1')}
             >
-              {saving ? 'Saving…' : isEditing ? 'Save changes' : 'Create project'}
+              {saving
+                ? 'Saving…'
+                : isEditing
+                  ? isAdminRequest
+                    ? 'Submit edit request'
+                    : 'Save changes'
+                  : 'Create project'}
             </button>
             <button
               type="button"

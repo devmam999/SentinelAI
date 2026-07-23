@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
+import NotificationBell from './NotificationBell'
 
 const headerButtonStyle = {
   fontFamily: 'var(--font-inter)',
@@ -77,6 +78,7 @@ export default function AppHeader() {
             {profile.username}
           </span>
         )}
+        <NotificationBell />
         <button
           type="button"
           onClick={() => navigate('/settings')}

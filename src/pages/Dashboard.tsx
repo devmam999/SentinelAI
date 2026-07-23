@@ -3,25 +3,17 @@ import { useNavigate } from 'react-router-dom'
 import AppHeader from '../components/AppHeader'
 import DeleteProjectModal from '../components/DeleteProjectModal'
 import { useAuth } from '../context/AuthContext'
-import { supabase, isSupabaseConfigured } from '../lib/supabase'
-
-type Project = {
-  id: string
-  name: string
-  github_repo: string | null
-  slack_webhook: string | null
-  runbooks: string | null
-  created_at: string
-}
+import { isSupabaseConfigured } from '../lib/supabase'
+import { fetchMyProjects, roleLabel, type DashboardProject } from '../lib/projectTeam'
 
 export default function Dashboard() {
   const { profile } = useAuth()
   const navigate = useNavigate()
 
-  const [projects, setProjects] = useState<Project[]>([])
+  const [projects, setProjects] = useState<DashboardProject[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<DashboardProject | null>(null)
 
   useEffect(() => {
     let active = true
@@ -33,20 +25,24 @@ export default function Dashboard() {
         return
       }
 
-      const { data, error } = await supabase
-        .from('projects')
-        .select('*')
-        .order('created_at', { ascending: false })
+      const { projects: nextProjects, error: projectError } = await fetchMyProjects()
 
       if (!active) return
-      if (error) setError(error.message)
-      else setProjects(data ?? [])
+      if (projectError) setError(projectError)
+      else setProjects(nextProjects)
       setLoading(false)
     }
 
     loadProjects()
+
+    const handleInviteAccepted = () => {
+      void loadProjects()
+    }
+    window.addEventListener('sentinel-invite-accepted', handleInviteAccepted)
+
     return () => {
       active = false
+      window.removeEventListener('sentinel-invite-accepted', handleInviteAccepted)
     }
   }, [])
 
@@ -268,12 +264,14 @@ function ProjectCard({
   onEdit,
   onDelete,
 }: {
-  project: Project
+  project: DashboardProject
   onOpen: () => void
   onEdit: () => void
   onDelete: () => void
 }) {
   const [hovered, setHovered] = useState(false)
+  const isOwner = project.my_role === 'owner'
+  const isAdmin = project.my_role === 'admin'
 
   const integrations = [
     { label: 'GitHub', value: project.github_repo },
@@ -344,6 +342,23 @@ function ProjectCard({
         >
           {project.name}
         </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+          <span
+            style={{
+              fontFamily: 'var(--font-jetbrains)',
+              fontSize: '0.66rem',
+              fontWeight: 600,
+              letterSpacing: '0.04em',
+              color: isOwner || isAdmin ? 'var(--primary)' : 'var(--muted-foreground)',
+              background: isOwner || isAdmin ? 'rgba(0,214,143,0.09)' : 'var(--muted)',
+              border: `1px solid ${isOwner || isAdmin ? 'rgba(0,214,143,0.22)' : 'var(--border)'}`,
+              borderRadius: 4,
+              padding: '2px 7px',
+            }}
+          >
+            {roleLabel(project.my_role)}
+          </span>
+        </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {integrations.map((integration) => {
             const connected = Boolean(integration.value)
@@ -372,16 +387,27 @@ function ProjectCard({
 
       {/* Actions */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-        <IconButton label="Edit project" onClick={stop(onEdit)}>
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
-            <path d="M11 2.5l2.5 2.5L6 12.5l-3 .5.5-3L11 2.5z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-          </svg>
-        </IconButton>
-        <IconButton label="Delete project" danger onClick={stop(onDelete)}>
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
-            <path d="M3 4.5h10M6.5 4V2.5h3V4M4.5 4.5l.5 8h6l.5-8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </IconButton>
+        {isOwner && (
+          <>
+            <IconButton label="Edit project" onClick={stop(onEdit)}>
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+                <path d="M11 2.5l2.5 2.5L6 12.5l-3 .5.5-3L11 2.5z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+              </svg>
+            </IconButton>
+            <IconButton label="Delete project" danger onClick={stop(onDelete)}>
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+                <path d="M3 4.5h10M6.5 4V2.5h3V4M4.5 4.5l.5 8h6l.5-8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </IconButton>
+          </>
+        )}
+        {isAdmin && (
+          <IconButton label="Request project edit" onClick={stop(onEdit)}>
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+              <path d="M11 2.5l2.5 2.5L6 12.5l-3 .5.5-3L11 2.5z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+            </svg>
+          </IconButton>
+        )}
         <span style={{ display: 'flex', alignItems: 'center', color: 'var(--muted-foreground)', paddingLeft: 2 }}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
             <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />

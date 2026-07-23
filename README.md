@@ -35,12 +35,13 @@ Alert ─▶ FastAPI backend
              └─▶ Slack Webhook   → formatted incident report in your channel
 ```
 
-The **frontend** (React) lets a user sign up with a username, connect projects
-(GitHub repo, Slack webhook, runbooks), manage account settings, and trigger
-incident analyses. **Supabase** handles authentication, user profiles,
-the projects database, and runbook file storage. The **backend** (FastAPI,
-Docker) runs the AI incident pipeline and persists ChromaDB vectors on a
-dedicated volume.
+The **frontend** (React) lets users sign up with a username, create and join
+projects (GitHub repo, Slack webhook, runbooks), collaborate via **roles and
+invitations**, manage account settings, and run incident analyses with
+**fix approval workflows**. **Supabase** handles authentication, profiles,
+projects, team membership, invitations, persisted incidents, and runbook
+storage. The **backend** (FastAPI, Docker) runs the AI incident pipeline and
+persists ChromaDB vectors on a dedicated volume.
 
 **Recommended production layout:** frontend on **Vercel**, backend on **Render**
 (or any Docker host with a persistent volume). The backend is not a good fit for
@@ -166,17 +167,26 @@ Commit blame stays a separate step: recent history from GitHub + LLM reasoning.
 SentinelAI/
 ├── src/                          # Frontend — React + Vite + Tailwind (dark/green theme)
 │   ├── components/
-│   │   ├── AppHeader.tsx         # Dashboard header (username, Settings, Sign out)
+│   │   ├── AppHeader.tsx         # Dashboard header (username, notifications, Settings, Sign out)
 │   │   ├── AuthLayout.tsx        # Sign-in / sign-up shell
 │   │   ├── DeleteAccountModal.tsx
 │   │   ├── DeleteProjectModal.tsx
+│   │   ├── LeaveProjectModal.tsx
+│   │   ├── TransferOwnershipModal.tsx
+│   │   ├── NotificationBell.tsx  # Pending project invitations (accept / decline)
+│   │   ├── ProjectTeamModal.tsx  # Team & permissions modal
+│   │   ├── ProjectTeamSection.tsx
+│   │   ├── ProjectEditRequestsSection.tsx
+│   │   ├── ResolveIncidentModal.tsx
 │   │   ├── PasswordRequirements.tsx
 │   │   └── …                     # Navbar, Hero, Features, HowItWorks, etc.
 │   ├── context/
-│   │   └── AuthContext.tsx       # Supabase session + profile provider
+│   │   ├── AuthContext.tsx       # Supabase session + profile provider
+│   │   └── PendingInvitationsContext.tsx
 │   ├── lib/
 │   │   ├── supabase.ts           # Supabase client (auth, DB, storage)
 │   │   ├── api.ts                # Client for the FastAPI backend
+│   │   ├── projectTeam.ts        # Roles, invites, incidents, fixes, edit requests
 │   │   ├── profile.ts            # Profile helpers + login username lookup RPCs
 │   │   ├── passwordValidation.ts
 │   │   └── usernameValidation.ts
@@ -184,10 +194,10 @@ SentinelAI/
 │   │   ├── Landing.tsx
 │   │   ├── Login.tsx             # Username or email + password
 │   │   ├── SignUp.tsx            # Username, email, password + strength meter
-│   │   ├── Dashboard.tsx         # Projects list, delete with sudo confirmation
+│   │   ├── Dashboard.tsx         # Owned + shared projects, role badges, delete (owner)
 │   │   ├── Settings.tsx          # Change username / email / password, delete account
-│   │   ├── AddProject.tsx        # Create & edit projects + runbook upload
-│   │   └── ProjectDetail.tsx     # Live incident analysis
+│   │   ├── AddProject.tsx        # Create & edit projects + runbook upload / edit requests
+│   │   └── ProjectDetail.tsx     # Incidents, team header actions, fix reviews
 │   ├── App.tsx
 │   └── index.css
 │
@@ -210,7 +220,7 @@ SentinelAI/
 │   └── .env.example
 │
 ├── supabase/
-│   └── schema.sql                # profiles, projects, RLS, storage, auth RPCs
+│   └── schema.sql                # profiles, projects, teams, incidents, RLS, RPCs
 │
 ├── index.html
 ├── package.json
@@ -256,7 +266,10 @@ database**, and **runbook file storage**.
    | 4 | Backfill confirmed users; remove unconfirmed profile rows |
    | 5 | **`projects` table** + RLS |
    | 6 | **`runbooks` private storage bucket** + per-user policies |
-   | RPCs | `resolve_login_email`, `is_username_available`, `update_username`, `delete_own_account` |
+   | 7 | **`project_members`**, **`project_invitations`**, **`incidents`**, **`incident_fixes`** + team/incident RPCs |
+   | 8 | **`project_edit_requests`**, ownership transfer, leave project, role management |
+   | RPCs | Auth: `resolve_login_email`, `is_username_available`, `update_username`, `delete_own_account` |
+   | | Teams: `invite_project_member`, `accept_project_invitation`, `get_my_pending_invitations`, `transfer_project_ownership`, `leave_project`, … |
 
    **Username rules** (enforced in app + DB): max 20 characters, no spaces,
    unique case-insensitively.
@@ -307,11 +320,56 @@ variables only).
 | **Sign up** | Username (required), email, password with live strength meter; if email exists but unverified, resends confirmation instead of “try logging in” |
 | **Log in** | **Username or email** + password; blocked until email is verified (resend link offered) |
 | **Verify email** | `/verify-email` — resend confirmation or sign out; dashboard and protected routes require verified email |
-| **Dashboard** | Shows **username** (not email) in the header; **Settings** + red **Sign out** |
+| **Dashboard header** | Shows **username**; **notifications bell** (pending project invites); **Settings**; red **Sign out** |
 | **Settings** | Change username (instant), email (confirmation to new address), password (new + confirm); delete account via `sudo delete [username]` modal |
 | **Projects** | Create/edit with GitHub repo, Slack webhook ([get one from Slack apps](https://api.slack.com/apps)), runbooks |
-| **Delete project** | In-app modal: confirm → type `sudo delete [Project Name]` |
+| **Delete project** | Owner only — dashboard trash icon → confirm → type `sudo delete [Project Name]` |
 | **Runbooks** | `.md` or `.pdf`; must include four sections (validated semantically on upload) |
+
+### Projects, teams & permissions
+
+Each project has three roles. The dashboard lists projects you **own** and projects you **joined** as admin or user, with a role badge on each card.
+
+| Role | Label in UI | What they can do |
+| ---- | ----------- | ---------------- |
+| **Owner** | Owner | Delete the project, transfer ownership, promote/demote admins, invite teammates, remove members, approve edit requests and incident fixes, auto-resolve incidents |
+| **Admin** | Admin | Invite teammates, remove **users** (not other admins), submit **edit requests** for owner approval, review/approve incident fixes, auto-resolve incidents |
+| **Member** | User | View the project, run incident analysis, propose fixes (owner/admin must approve before an incident is marked resolved) |
+
+**Invitations**
+
+- Owners and admins invite by **username or email** from the **Team & permissions** modal (project page header: green **Invite** button).
+- The invitee must already be a **registered SentinelAI user** (confirmed account). Otherwise the app shows: *Invalid user/email. Please ask them to register to SentinelAI*.
+- Pending invites appear in the **notifications bell** (dashboard header, before Settings). Accept or decline from the dropdown; the list refreshes on focus and every 30 seconds.
+- Inviters see pending invites inside the team modal; hover a row to reveal a cancel (**×**) button.
+
+**Team modal** (project page)
+
+- Open via **Invite** (owners/admins) or **Team** (members — view-only team list).
+- Each member row shows a **role dropdown** (when you have permission): set **User** / **Admin**, **Make owner**, or **Remove access**.
+- Only the **owner** can change someone between User and Admin, transfer ownership, or remove admins.
+- Admins can remove **users** only.
+
+**Destructive confirmations** (two-step modals with smooth fade/slide transitions)
+
+| Action | Who | Step 1 | Step 2 — type exactly |
+| ------ | --- | ------ | --------------------- |
+| Delete account | Any user | Warning | `sudo delete [username]` |
+| Delete project | Owner | Warning | `sudo delete [Project Name]` |
+| Transfer ownership | Owner | Warning (irreversible unless new owner transfers back) | `sudo chown [username]` |
+| Leave project | Admin or user | Warning (rejoin only by re-invite) | `sudo deluser [username] [Project Name]` |
+
+**Leave project** is in the **project page header**, to the right of **Invite** / **Team** (not inside the team modal).
+
+**Project edits by admins**
+
+- Admins cannot change project settings directly. **Add/Edit Project** submits a **request**; the owner approves or declines on the project detail page.
+
+**Incidents & fixes**
+
+- Analyses are saved as **incidents** in Supabase (not just ephemeral UI state).
+- Teammates propose a fix description; owners/admins **accept** or **decline** it (or auto-resolve if they have permission).
+- Resolved incidents appear in project history.
 
 ---
 
@@ -499,12 +557,17 @@ curl -X POST http://localhost:8000/api/incidents/analyze \
 
 1. Run `supabase/schema.sql`, configure `.env.local` files, start backend
    (`docker compose up --build`) and frontend (`npm run dev`).
-2. **Sign up** with a username, email, and strong password.
+2. **Sign up** with a username, email, and strong password; confirm email.
 3. On the dashboard, click **New Project** — add a GitHub repo, Slack webhook
    (from <https://api.slack.com/apps>), and upload runbooks (`.md` / `.pdf`).
-4. Open the project and click **Analyze Incident**. Sentinel validates and
-   indexes runbooks, scans commits, reasons with Gemini, shows results on the
-   page, and posts to Slack when a webhook is configured.
-5. Use **Settings** (header) to update username, email, or password, or delete
-   your account. Delete a project from the dashboard trash icon (requires
-   `sudo delete [Project Name]`).
+4. **Invite teammates** from the project page (**Invite** → Team & permissions).
+   They accept from the **notifications bell** on their dashboard.
+5. Open the project and click **Analyze Incident**. Sentinel validates and
+   indexes runbooks, scans commits, reasons with Gemini, saves the incident,
+   shows results on the page, and posts to Slack when a webhook is configured.
+6. Teammates **propose fixes**; owners/admins review pending fixes on the project
+   page (or resolve directly if permitted).
+7. Use **Settings** to update username, email, or password, or delete your
+   account (`sudo delete [username]`). Owners delete projects from the dashboard
+   (`sudo delete [Project Name]`). Non-owners can **Leave project** from the
+   project header (`sudo deluser [username] [Project Name]`).

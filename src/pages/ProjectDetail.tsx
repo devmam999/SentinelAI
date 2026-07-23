@@ -1,7 +1,33 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
-import { analyzeIncident, indexRunbookFile, type IncidentAnalysis } from '../lib/api'
+import { analyzeIncident, indexRunbookFile } from '../lib/api'
+import { useAuth } from '../context/AuthContext'
+import ProjectTeamModal from '../components/ProjectTeamModal'
+import LeaveProjectModal from '../components/LeaveProjectModal'
+import ProjectEditRequestsSection from '../components/ProjectEditRequestsSection'
+import ResolveIncidentModal from '../components/ResolveIncidentModal'
+import {
+  canAutoResolveIncidents,
+  canManageTeam,
+  canReviewFixes,
+  createProjectIncident,
+  fetchIncidentFixes,
+  fetchPendingEditRequests,
+  fetchProjectIncidents,
+  fetchProjectInvitations,
+  fetchProjectTeam,
+  getMyProjectRole,
+  reviewIncidentFix,
+  roleLabel,
+  submitIncidentFix,
+  type IncidentFix,
+  type ProjectEditRequest,
+  type ProjectInvitation,
+  type ProjectRole,
+  type StoredIncident,
+  type TeamMember,
+} from '../lib/projectTeam'
 
 type Project = {
   id: string
@@ -12,12 +38,9 @@ type Project = {
   created_at: string
 }
 
-type Incident = {
-  id: number
-  title: string
-  status: 'active' | 'resolved'
-  analysis?: IncidentAnalysis
-  slackPosted?: boolean
+type IncidentWithFix = StoredIncident & {
+  pendingFix?: IncidentFix | null
+  latestFix?: IncidentFix | null
 }
 
 function parseRunbooks(runbooks: string | null): string[] {
@@ -35,16 +58,66 @@ function baseName(path: string): string {
 export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const { user, profile } = useAuth()
 
   const [project, setProject] = useState<Project | null>(null)
+  const [myRole, setMyRole] = useState<ProjectRole | null>(null)
+  const [team, setTeam] = useState<TeamMember[]>([])
+  const [invitations, setInvitations] = useState<ProjectInvitation[]>([])
+  const [editRequests, setEditRequests] = useState<ProjectEditRequest[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const [incidents, setIncidents] = useState<Incident[]>([])
-  const [nextId, setNextId] = useState(101)
+  const [incidents, setIncidents] = useState<IncidentWithFix[]>([])
   const [alertText, setAlertText] = useState('')
   const [analyzing, setAnalyzing] = useState(false)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
+  const [resolveTarget, setResolveTarget] = useState<IncidentWithFix | null>(null)
+  const [reviewError, setReviewError] = useState<string | null>(null)
+  const [reviewingFixId, setReviewingFixId] = useState<string | null>(null)
+  const [teamModalOpen, setTeamModalOpen] = useState(false)
+  const [leaveModalOpen, setLeaveModalOpen] = useState(false)
+
+  const isOwner = myRole === 'owner'
+  const canReview = canReviewFixes(myRole)
+  const canManage = canManageTeam(myRole)
+  const canAutoResolve = canAutoResolveIncidents(myRole)
+
+  const reloadTeam = useCallback(async () => {
+    if (!id) return
+    const [{ data }, nextTeam, nextInvitations, nextEditRequests] = await Promise.all([
+      supabase.from('projects').select('*').eq('id', id).single(),
+      fetchProjectTeam(id),
+      fetchProjectInvitations(id),
+      fetchPendingEditRequests(id),
+    ])
+    if (data) setProject(data)
+    setTeam(nextTeam)
+    setInvitations(nextInvitations)
+    setEditRequests(nextEditRequests)
+    const role = await getMyProjectRole(id)
+    setMyRole(role)
+  }, [id])
+
+  const reloadIncidents = useCallback(async () => {
+    if (!id) return
+    const [nextIncidents, fixes] = await Promise.all([fetchProjectIncidents(id), fetchIncidentFixes(id)])
+    const fixesByIncident = new Map<string, IncidentFix[]>()
+    for (const fix of fixes) {
+      const list = fixesByIncident.get(fix.incident_id) ?? []
+      list.push(fix)
+      fixesByIncident.set(fix.incident_id, list)
+    }
+
+    setIncidents(
+      nextIncidents.map((incident) => {
+        const incidentFixes = fixesByIncident.get(incident.id) ?? []
+        const pendingFix = incidentFixes.find((fix) => fix.status === 'pending') ?? null
+        const latestFix = incidentFixes[0] ?? null
+        return { ...incident, pendingFix, latestFix }
+      }),
+    )
+  }, [id])
 
   useEffect(() => {
     if (!id) return
@@ -56,25 +129,45 @@ export default function ProjectDetail() {
         setLoading(false)
         return
       }
-      const { data, error } = await supabase.from('projects').select('*').eq('id', id).single()
+
+      const [{ data, error: projectError }, role] = await Promise.all([
+        supabase.from('projects').select('*').eq('id', id).single(),
+        getMyProjectRole(id!),
+      ])
+
       if (!active) return
-      if (error) setError(error.message)
-      else setProject(data)
-      setLoading(false)
+
+      if (projectError) {
+        setError(projectError.message)
+        setLoading(false)
+        return
+      }
+
+      if (!role) {
+        setError('You do not have access to this project.')
+        setLoading(false)
+        return
+      }
+
+      setProject(data)
+      setMyRole(role)
+      await Promise.all([reloadTeam(), reloadIncidents()])
+      if (active) setLoading(false)
     }
 
     loadProject()
     return () => {
       active = false
     }
-  }, [id])
+  }, [id, reloadIncidents, reloadTeam])
 
   const activeIncidents = incidents.filter((i) => i.status === 'active')
   const recentIncidents = incidents.filter((i) => i.status === 'resolved')
+  const pendingFixes = incidents
+    .map((incident) => incident.pendingFix)
+    .filter((fix): fix is IncidentFix => Boolean(fix))
   const isHealthy = activeIncidents.length === 0
 
-  // Best-effort: push this project's runbooks (.md and .pdf) into ChromaDB so
-  // Sentinel's semantic search has content to match. PDFs are parsed server-side.
   const indexRunbooksBestEffort = async () => {
     if (!project) return
     const runbookPaths = parseRunbooks(project.runbooks).filter((p) => /\.(md|pdf)$/i.test(p))
@@ -100,7 +193,7 @@ export default function ProjectDetail() {
   }
 
   const triggerAnalysis = async () => {
-    if (!project) return
+    if (!project || !user) return
     if (!project.github_repo) {
       setAnalyzeError('Add a GitHub repository to this project before analyzing.')
       return
@@ -109,24 +202,27 @@ export default function ProjectDetail() {
     setAnalyzeError(null)
     try {
       await indexRunbooksBestEffort()
+      const alertDescription = alertText.trim() || 'A production alert fired.'
       const result = await analyzeIncident({
         github_repo: project.github_repo,
-        description: alertText.trim() || 'A production alert fired.',
+        description: alertDescription,
         slack_webhook_url: project.slack_webhook,
         post_to_slack: Boolean(project.slack_webhook),
       })
       const { analysis } = result
-      setIncidents((current) => [
-        {
-          id: nextId,
-          title: analysis.likely_cause || analysis.most_relevant_commit || 'Production incident',
-          status: 'active',
-          analysis,
-          slackPosted: result.slack_posted,
-        },
-        ...current,
-      ])
-      setNextId((n) => n + 1)
+      const { incident, error: saveError } = await createProjectIncident({
+        projectId: project.id,
+        title: analysis.likely_cause || analysis.most_relevant_commit || 'Production incident',
+        alertDescription,
+        analysis,
+        slackPosted: result.slack_posted,
+        createdBy: user.id,
+      })
+      if (saveError || !incident) {
+        setAnalyzeError(saveError ?? 'Could not save incident.')
+        return
+      }
+      await reloadIncidents()
       setAlertText('')
     } catch (err) {
       setAnalyzeError(err instanceof Error ? err.message : 'Analysis failed. Is the backend running?')
@@ -135,15 +231,30 @@ export default function ProjectDetail() {
     }
   }
 
-  const resolveIncident = (incidentId: number) => {
-    setIncidents((current) => current.map((i) => (i.id === incidentId ? { ...i, status: 'resolved' } : i)))
+  const handleSubmitFix = async (fixDescription: string) => {
+    if (!resolveTarget) return
+    const { error: submitError } = await submitIncidentFix(resolveTarget.id, fixDescription)
+    if (submitError) throw new Error(submitError)
+    setResolveTarget(null)
+    await reloadIncidents()
   }
 
-  // Runbooks are private storage paths — mint a short-lived signed URL to open one.
+  const handleReviewFix = async (fixId: string, approve: boolean) => {
+    setReviewError(null)
+    setReviewingFixId(fixId)
+    const { error: reviewErr } = await reviewIncidentFix(fixId, approve)
+    setReviewingFixId(null)
+    if (reviewErr) {
+      setReviewError(reviewErr)
+      return
+    }
+    await reloadIncidents()
+  }
+
   const openRunbook = async (path: string) => {
-    const { data, error } = await supabase.storage.from('runbooks').createSignedUrl(path, 60)
-    if (error || !data?.signedUrl) {
-      window.alert(`Could not open runbook: ${error?.message ?? 'unknown error'}`)
+    const { data, error: signedUrlError } = await supabase.storage.from('runbooks').createSignedUrl(path, 60)
+    if (signedUrlError || !data?.signedUrl) {
+      window.alert(`Could not open runbook: ${signedUrlError?.message ?? 'unknown error'}`)
       return
     }
     window.open(data.signedUrl, '_blank', 'noopener,noreferrer')
@@ -153,7 +264,6 @@ export default function ProjectDetail() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--background)', color: 'var(--foreground)' }}>
-      {/* Top bar */}
       <header
         className="flex items-center justify-between px-6 md:px-10"
         style={{
@@ -188,6 +298,88 @@ export default function ProjectDetail() {
             SentinelAI
           </span>
         </Link>
+
+        {!loading && !error && project && user && myRole && (canManage || myRole === 'member') && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button
+              type="button"
+              onClick={() => setTeamModalOpen(true)}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                fontFamily: 'var(--font-inter)',
+                fontWeight: 700,
+                fontSize: '0.85rem',
+                color: canManage ? 'var(--primary-foreground)' : 'var(--foreground)',
+                background: canManage ? 'var(--primary)' : 'transparent',
+                border: canManage ? 'none' : '1px solid var(--border)',
+                borderRadius: 5,
+                cursor: 'pointer',
+                padding: '9px 16px',
+                transition: 'opacity 0.15s',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.88')}
+              onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
+            >
+              {canManage ? (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <circle cx="5.5" cy="4.75" r="2.25" stroke="currentColor" strokeWidth="1.35" />
+                  <path
+                    d="M1.5 12.75c0-2.21 1.79-4 4-4s4 1.79 4 4"
+                    stroke="currentColor"
+                    strokeWidth="1.35"
+                    strokeLinecap="round"
+                  />
+                  <path
+                    d="M11.25 5.25v3.5M9.5 7h3.5"
+                    stroke="currentColor"
+                    strokeWidth="1.35"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <circle cx="8" cy="5.25" r="2.35" stroke="currentColor" strokeWidth="1.35" />
+                  <path
+                    d="M3.25 13.25c0-2.63 2.13-4.75 4.75-4.75s4.75 2.12 4.75 4.75"
+                    stroke="currentColor"
+                    strokeWidth="1.35"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              )}
+              {canManage ? 'Invite' : 'Team'}
+            </button>
+
+            {myRole !== 'owner' && (
+              <button
+                type="button"
+                onClick={() => setLeaveModalOpen(true)}
+                style={{
+                  fontFamily: 'var(--font-inter)',
+                  fontWeight: 600,
+                  fontSize: '0.85rem',
+                  color: '#ff8a8a',
+                  background: 'transparent',
+                  border: '1px solid rgba(255,95,95,0.25)',
+                  borderRadius: 5,
+                  cursor: 'pointer',
+                  padding: '9px 16px',
+                  transition: 'opacity 0.15s, border-color 0.15s',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = 'rgba(255,95,95,0.45)'
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = 'rgba(255,95,95,0.25)'
+                }}
+              >
+                Leave project
+              </button>
+            )}
+          </div>
+        )}
       </header>
 
       <main className="animate-fade-down" style={{ maxWidth: 820, margin: '0 auto', padding: '40px 24px 80px' }}>
@@ -218,7 +410,6 @@ export default function ProjectDetail() {
           <div style={loadingStyle}>Project not found.</div>
         ) : (
           <>
-            {/* Title + status */}
             <div className="flex flex-wrap items-center gap-4" style={{ marginBottom: 28 }}>
               <h1
                 style={{
@@ -231,9 +422,26 @@ export default function ProjectDetail() {
                 {project.name}
               </h1>
               <StatusPill healthy={isHealthy} />
+              {myRole && (
+                <span
+                  style={{
+                    fontFamily: 'var(--font-jetbrains)',
+                    fontSize: '0.68rem',
+                    fontWeight: 600,
+                    letterSpacing: '0.06em',
+                    textTransform: 'uppercase',
+                    color: isOwner || myRole === 'admin' ? 'var(--primary)' : 'var(--muted-foreground)',
+                    background: isOwner || myRole === 'admin' ? 'rgba(0,214,143,0.09)' : 'var(--muted)',
+                    border: `1px solid ${isOwner || myRole === 'admin' ? 'rgba(0,214,143,0.22)' : 'var(--border)'}`,
+                    borderRadius: 4,
+                    padding: '3px 8px',
+                  }}
+                >
+                  {roleLabel(myRole)}
+                </span>
+              )}
             </div>
 
-            {/* Integration status grid */}
             <div
               style={{
                 display: 'grid',
@@ -249,10 +457,83 @@ export default function ProjectDetail() {
                 value={runbookFiles.length > 0 ? `${runbookFiles.length} Uploaded` : 'None uploaded'}
                 good={runbookFiles.length > 0}
               />
-              <StatCard label="Alert Source" value="AI Analysis" good />
+              <StatCard label="Alert Source" value="Manual trigger" good />
             </div>
 
-            {/* Current incidents */}
+            {isOwner && editRequests.length > 0 && (
+              <ProjectEditRequestsSection requests={editRequests} onReviewed={reloadTeam} />
+            )}
+
+            {canReview && pendingFixes.length > 0 && (
+              <>
+                <SectionHeading>Pending fix reviews</SectionHeading>
+                {reviewError && <div style={{ ...errorStyle, marginBottom: 12 }}>{reviewError}</div>}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 28 }}>
+                  {pendingFixes.map((fix) => (
+                    <div
+                      key={fix.id}
+                      style={{
+                        background: 'var(--card)',
+                        border: '1px solid rgba(240,192,64,0.25)',
+                        borderRadius: 10,
+                        padding: '16px 18px',
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontFamily: 'var(--font-inter)',
+                          fontSize: '0.92rem',
+                          fontWeight: 700,
+                          marginBottom: 6,
+                        }}
+                      >
+                        #{fix.incident_number} {fix.incident_title}
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: 'var(--font-jetbrains)',
+                          fontSize: '0.72rem',
+                          color: 'var(--muted-foreground)',
+                          marginBottom: 10,
+                        }}
+                      >
+                        Submitted by {fix.submitter_username || 'teammate'}
+                      </div>
+                      <p
+                        style={{
+                          fontFamily: 'var(--font-inter)',
+                          fontSize: '0.88rem',
+                          lineHeight: 1.55,
+                          color: 'var(--foreground)',
+                          marginBottom: 14,
+                        }}
+                      >
+                        {fix.fix_description}
+                      </p>
+                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          onClick={() => handleReviewFix(fix.id, true)}
+                          disabled={reviewingFixId === fix.id}
+                          style={{ ...simulateButtonStyle, opacity: reviewingFixId === fix.id ? 0.6 : 1 }}
+                        >
+                          Accept fix
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleReviewFix(fix.id, false)}
+                          disabled={reviewingFixId === fix.id}
+                          style={{ ...resolveButtonStyle, opacity: reviewingFixId === fix.id ? 0.6 : 1 }}
+                        >
+                          Decline
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
             <SectionHeading>Current Incidents</SectionHeading>
             <div style={{ marginBottom: 16 }}>
               {activeIncidents.length === 0 ? (
@@ -263,7 +544,8 @@ export default function ProjectDetail() {
                     <ActiveIncidentCard
                       key={incident.id}
                       incident={incident}
-                      onResolve={() => resolveIncident(incident.id)}
+                      isAdmin={canAutoResolve}
+                      onResolve={() => setResolveTarget(incident)}
                     />
                   ))}
                 </div>
@@ -312,7 +594,6 @@ export default function ProjectDetail() {
               </button>
             </div>
 
-            {/* Recent incidents */}
             <SectionHeading style={{ marginTop: 40 }}>Recent Incidents</SectionHeading>
             {recentIncidents.length === 0 ? (
               <div style={emptyRowStyle}>No recent incidents.</div>
@@ -320,9 +601,18 @@ export default function ProjectDetail() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {recentIncidents.map((incident) => (
                   <div key={incident.id} style={incidentRowStyle}>
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <span style={monoMuted}>#{incident.id}</span>
-                      <span style={{ fontFamily: 'var(--font-inter)', fontSize: '0.9rem', color: 'var(--foreground)' }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                      <span style={monoMuted}>#{incident.incident_number}</span>
+                      <span
+                        style={{
+                          fontFamily: 'var(--font-inter)',
+                          fontSize: '0.9rem',
+                          color: 'var(--foreground)',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
                         {incident.title}
                       </span>
                     </span>
@@ -332,7 +622,6 @@ export default function ProjectDetail() {
               </div>
             )}
 
-            {/* Project overview */}
             <SectionHeading style={{ marginTop: 40 }}>Project Overview</SectionHeading>
             <div
               style={{
@@ -388,23 +677,64 @@ export default function ProjectDetail() {
               </OverviewRow>
             </div>
 
-            {/* Edit shortcut */}
-            <button
-              onClick={() => navigate(`/edit-project/${project.id}`)}
-              style={{ ...resolveButtonStyle, marginTop: 24 }}
-              onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--primary)')}
-              onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
-            >
-              Edit project
-            </button>
+            {isOwner && (
+              <button
+                onClick={() => navigate(`/edit-project/${project.id}`)}
+                style={{ ...resolveButtonStyle, marginTop: 24 }}
+                onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--primary)')}
+                onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
+              >
+                Edit project
+              </button>
+            )}
+
+            {myRole === 'admin' && (
+              <button
+                onClick={() => navigate(`/edit-project/${project.id}`)}
+                style={{ ...resolveButtonStyle, marginTop: 24 }}
+                onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--primary)')}
+                onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
+              >
+                Request project edit
+              </button>
+            )}
           </>
         )}
       </main>
+
+      {teamModalOpen && user && myRole && project && (
+        <ProjectTeamModal
+          projectId={project.id}
+          myRole={myRole}
+          team={team}
+          invitations={invitations}
+          currentUserId={user.id}
+          onClose={() => setTeamModalOpen(false)}
+          onChanged={reloadTeam}
+        />
+      )}
+
+      {leaveModalOpen && project && (
+        <LeaveProjectModal
+          projectId={project.id}
+          projectName={project.name}
+          username={profile?.username ?? null}
+          onClose={() => setLeaveModalOpen(false)}
+          onLeft={() => navigate('/dashboard')}
+        />
+      )}
+
+      {resolveTarget && (
+        <ResolveIncidentModal
+          incidentTitle={resolveTarget.title}
+          canAutoResolve={canAutoResolve}
+          onClose={() => setResolveTarget(null)}
+          onSubmit={handleSubmitFix}
+        />
+      )}
     </div>
   )
 }
-
-/* ── small presentational helpers ─────────────────────────────────────────── */
 
 function StatusPill({ healthy }: { healthy: boolean }) {
   return (
@@ -467,29 +797,82 @@ function StatCard({ label, value, good }: { label: string; value: string; good: 
   )
 }
 
-function ActiveIncidentCard({ incident, onResolve }: { incident: Incident; onResolve: () => void }) {
+function ActiveIncidentCard({
+  incident,
+  isAdmin,
+  onResolve,
+}: {
+  incident: IncidentWithFix
+  isAdmin: boolean
+  onResolve: () => void
+}) {
   const a = incident.analysis
+  const hasPendingFix = incident.pendingFix?.status === 'pending'
+
   return (
     <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10, padding: '16px 18px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={monoMuted}>#{incident.id}</span>
+          <span style={monoMuted}>#{incident.incident_number}</span>
           <span style={{ fontFamily: 'var(--font-inter)', fontSize: '0.95rem', fontWeight: 600, color: 'var(--foreground)' }}>
             {incident.title}
           </span>
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <StatusTag kind="active">Active</StatusTag>
-          <button
-            onClick={onResolve}
-            style={resolveButtonStyle}
-            onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--primary)')}
-            onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
-          >
-            Resolve
-          </button>
+          {hasPendingFix ? (
+            <StatusTag kind="active">Awaiting approval</StatusTag>
+          ) : (
+            <StatusTag kind="active">Active</StatusTag>
+          )}
+          {!hasPendingFix && (
+            <button
+              onClick={onResolve}
+              style={resolveButtonStyle}
+              onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--primary)')}
+              onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
+            >
+              Resolve issue
+            </button>
+          )}
         </span>
       </div>
+
+      {hasPendingFix && incident.pendingFix && (
+        <div
+          style={{
+            marginTop: 14,
+            padding: '12px 14px',
+            borderRadius: 8,
+            background: 'rgba(240,192,64,0.08)',
+            border: '1px solid rgba(240,192,64,0.22)',
+          }}
+        >
+          <div
+            style={{
+              fontFamily: 'var(--font-jetbrains)',
+              fontSize: '0.68rem',
+              fontWeight: 600,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              color: '#f0c040',
+              marginBottom: 6,
+            }}
+          >
+            {isAdmin ? 'Fix waiting for your review' : 'Fix submitted — waiting for admin approval'}
+          </div>
+          <p
+            style={{
+              fontFamily: 'var(--font-inter)',
+              fontSize: '0.86rem',
+              lineHeight: 1.55,
+              color: 'var(--foreground)',
+              margin: 0,
+            }}
+          >
+            {incident.pendingFix.fix_description}
+          </p>
+        </div>
+      )}
 
       {a && (
         <div style={{ marginTop: 14, display: 'grid', gap: 12 }}>
@@ -514,7 +897,7 @@ function ActiveIncidentCard({ incident, onResolve }: { incident: Incident; onRes
               <div style={{ fontFamily: 'var(--font-inter)', fontSize: '0.875rem', color: 'var(--muted-foreground)' }}>—</div>
             )}
           </div>
-          {incident.slackPosted && (
+          {incident.slack_posted && (
             <div style={{ fontFamily: 'var(--font-jetbrains)', fontSize: '0.72rem', color: 'var(--primary)' }}>
               ✓ Posted to Slack
             </div>
@@ -654,8 +1037,6 @@ function StatusTag({ kind, children }: { kind: 'active' | 'resolved'; children: 
     </span>
   )
 }
-
-/* ── shared inline styles ─────────────────────────────────────────────────── */
 
 const loadingStyle: React.CSSProperties = {
   fontFamily: 'var(--font-jetbrains)',
