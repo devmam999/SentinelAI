@@ -8,8 +8,8 @@ const features = [
         <path d="M11 6v5l3 3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
       </svg>
     ),
-    label: 'Instant Alert Response',
-    description: 'The moment a production alert fires, Sentinel responds automatically — no human trigger, no waiting for on-call to wake up.',
+    label: 'On-Demand Investigation',
+    description: 'When your on-call engineer manually fires an alert from the dashboard, Sentinel investigates immediately — no digging through logs or commit history by hand.',
   },
   {
     icon: (

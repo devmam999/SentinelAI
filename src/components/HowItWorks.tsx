@@ -9,8 +9,8 @@ const steps = [
   },
   {
     number: '02',
-    title: 'An alert fires — Sentinel responds',
-    description: 'The instant a production alert fires, Sentinel jumps in automatically. No human trigger, no waiting for on-call.',
+    title: 'You fire the alert — Sentinel responds',
+    description: 'From the project dashboard, your on-call engineer manually triggers an alert. Sentinel takes it from there — no automatic paging yet.',
     tag: 'TRIGGER',
   },
   {

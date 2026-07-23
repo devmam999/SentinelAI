@@ -8,7 +8,7 @@ const terminalLines = [
   { delay: 1800, text: '[00:00.9s] Correlating 847 log lines across 12 services', type: 'info' },
   { delay: 2400, text: '[00:01.3s] Root cause identified: db-replica-3 OOM kill', type: 'error' },
   { delay: 3000, text: '[00:01.7s] Suggested fix: Scale replica group +2 nodes', type: 'success' },
-  { delay: 3600, text: '[00:02.1s] Runbook generated — incident resolved in 2.1s', type: 'success' },
+  { delay: 3600, text: '[00:02.1s] Postmortem report generated — incident resolved in 2.1s', type: 'success' },
 ]
 
 export default function Hero() {
@@ -128,7 +128,7 @@ export default function Hero() {
             marginBottom: 40,
           }}
         >
-          SentinelAI is the autonomous AI SRE agent that detects, investigates, and resolves production incidents — before your on-call engineer even opens their laptop.
+          SentinelAI is the AI SRE agent that investigates production incidents the moment your team triggers an alert — correlating commits, runbooks, and impact in seconds.
         </p>
 
         {/* CTAs */}
