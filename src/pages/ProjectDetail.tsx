@@ -137,8 +137,8 @@ export default function ProjectDetail() {
 
       if (!active) return
 
-      if (projectError) {
-        setError(projectError.message)
+      if (projectError || !data) {
+        setError(projectError?.message ?? 'Project not found.')
         setLoading(false)
         return
       }
@@ -149,8 +149,21 @@ export default function ProjectDetail() {
         return
       }
 
+      const verifiedRole =
+        data.user_id === user?.id
+          ? 'owner'
+          : role === 'admin' || role === 'member'
+            ? role
+            : null
+
+      if (!verifiedRole) {
+        setError('You do not have access to this project.')
+        setLoading(false)
+        return
+      }
+
       setProject(data)
-      setMyRole(role)
+      setMyRole(verifiedRole)
       await Promise.all([reloadTeam(), reloadIncidents()])
       if (active) setLoading(false)
     }

@@ -90,9 +90,66 @@ export function canAutoResolveIncidents(role: ProjectRole | null): boolean {
 }
 
 export async function getMyProjectRole(projectId: string): Promise<ProjectRole | null> {
-  const { data, error } = await supabase.rpc('get_my_project_role', { p_project_id: projectId })
-  if (error || !data) return null
-  return data as ProjectRole
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) return null
+
+  const { data: project, error: projectError } = await supabase
+    .from('projects')
+    .select('user_id')
+    .eq('id', projectId)
+    .maybeSingle()
+
+  if (projectError || !project) return null
+  if (project.user_id === user.id) return 'owner'
+
+  const { data: membership, error: membershipError } = await supabase
+    .from('project_members')
+    .select('role')
+    .eq('project_id', projectId)
+    .eq('user_id', user.id)
+    .maybeSingle()
+
+  if (membershipError || !membership) return null
+  if (membership.role === 'admin' || membership.role === 'member') {
+    return membership.role as ProjectRole
+  }
+
+  return null
+}
+
+function resolveProjectRole(projectUserId: string, currentUserId: string, membershipRole?: string | null): ProjectRole | null {
+  if (projectUserId === currentUserId) return 'owner'
+  if (membershipRole === 'admin' || membershipRole === 'member') return membershipRole
+  return null
+}
+
+type ProjectRow = {
+  id: string
+  name: string
+  github_repo: string | null
+  slack_webhook: string | null
+  runbooks: string | null
+  created_at: string
+  user_id: string
+}
+
+function sortProjects(projects: DashboardProject[]) {
+  return projects.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+}
+
+function toDashboardProject(project: Omit<ProjectRow, 'user_id'>, myRole: ProjectRole): DashboardProject {
+  return {
+    id: project.id,
+    name: project.name,
+    github_repo: project.github_repo,
+    slack_webhook: project.slack_webhook,
+    runbooks: project.runbooks,
+    created_at: project.created_at,
+    my_role: myRole,
+  }
 }
 
 export async function fetchMyProjects(): Promise<{ projects: DashboardProject[]; error: string | null }> {
@@ -102,44 +159,55 @@ export async function fetchMyProjects(): Promise<{ projects: DashboardProject[];
 
   if (!user) return { projects: [], error: 'Not signed in' }
 
+  const byId = new Map<string, DashboardProject>()
+
   const { data: owned, error: ownedError } = await supabase
     .from('projects')
-    .select('id, name, github_repo, slack_webhook, runbooks, created_at')
+    .select('id, name, github_repo, slack_webhook, runbooks, created_at, user_id')
     .eq('user_id', user.id)
 
   if (ownedError) return { projects: [], error: ownedError.message }
 
+  for (const project of owned ?? []) {
+    if (project.user_id !== user.id) continue
+    byId.set(project.id, toDashboardProject(project, 'owner'))
+  }
+
   const { data: memberships, error: memberError } = await supabase
     .from('project_members')
-    .select('role, projects(id, name, github_repo, slack_webhook, runbooks, created_at, user_id)')
+    .select('role, project_id')
     .eq('user_id', user.id)
 
   if (memberError) return { projects: [], error: memberError.message }
 
-  const byId = new Map<string, DashboardProject>()
+  const memberProjectIds = (memberships ?? [])
+    .map((row) => row.project_id)
+    .filter((projectId) => projectId && !byId.has(projectId))
 
-  for (const project of owned ?? []) {
-    byId.set(project.id, { ...project, my_role: 'owner' })
-  }
+  if (memberProjectIds.length > 0) {
+    const { data: memberProjects, error: memberProjectsError } = await supabase
+      .from('projects')
+      .select('id, name, github_repo, slack_webhook, runbooks, created_at, user_id')
+      .in('id', memberProjectIds)
 
-  for (const row of memberships ?? []) {
-    const project = row.projects as unknown as (Omit<DashboardProject, 'my_role'> & { user_id: string }) | null
-    if (!project || byId.has(project.id)) continue
-    byId.set(project.id, {
-      id: project.id,
-      name: project.name,
-      github_repo: project.github_repo,
-      slack_webhook: project.slack_webhook,
-      runbooks: project.runbooks,
-      created_at: project.created_at,
-      my_role: row.role as ProjectRole,
-    })
+    if (memberProjectsError) return { projects: [], error: memberProjectsError.message }
+
+    const membershipByProjectId = new Map(
+      (memberships ?? []).map((row) => [row.project_id, row.role as string]),
+    )
+
+    for (const project of memberProjects ?? []) {
+      if (project.user_id === user.id || byId.has(project.id)) continue
+
+      const role = resolveProjectRole(project.user_id, user.id, membershipByProjectId.get(project.id))
+      if (!role || role === 'owner') continue
+
+      byId.set(project.id, toDashboardProject(project, role))
+    }
   }
 
   return {
-    projects: Array.from(byId.values()).sort(
-      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-    ),
+    projects: sortProjects(Array.from(byId.values())),
     error: null,
   }
 }

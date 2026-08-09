@@ -7,7 +7,7 @@ import { isSupabaseConfigured } from '../lib/supabase'
 import { fetchMyProjects, roleLabel, type DashboardProject } from '../lib/projectTeam'
 
 export default function Dashboard() {
-  const { profile } = useAuth()
+  const { profile, user } = useAuth()
   const navigate = useNavigate()
 
   const [projects, setProjects] = useState<DashboardProject[]>([])
@@ -16,6 +16,8 @@ export default function Dashboard() {
   const [deleteTarget, setDeleteTarget] = useState<DashboardProject | null>(null)
 
   useEffect(() => {
+    if (!user) return
+
     let active = true
 
     async function loadProjects() {
@@ -33,7 +35,8 @@ export default function Dashboard() {
       setLoading(false)
     }
 
-    loadProjects()
+    setLoading(true)
+    void loadProjects()
 
     const handleInviteAccepted = () => {
       void loadProjects()
@@ -44,7 +47,7 @@ export default function Dashboard() {
       active = false
       window.removeEventListener('sentinel-invite-accepted', handleInviteAccepted)
     }
-  }, [])
+  }, [user?.id])
 
   const handleDeleted = (projectId: string) => {
     setProjects((current) => current.filter((p) => p.id !== projectId))

@@ -440,7 +440,7 @@ where not exists (
   where pm.project_id = p.id and pm.user_id = p.user_id
 );
 
-create or replace function public.can_access_project(p_project_id uuid, p_user_id uuid default auth.uid())
+create or replace function public.can_access_project(p_project_id uuid, p_user_id uuid default null)
 returns boolean
 language sql
 security definer
@@ -452,17 +452,18 @@ as $$
     from public.projects p
     where p.id = p_project_id
       and (
-        p.user_id = p_user_id
+        p.user_id = coalesce(p_user_id, (select auth.uid()))
         or exists (
           select 1
           from public.project_members pm
-          where pm.project_id = p.id and pm.user_id = p_user_id
+          where pm.project_id = p.id
+            and pm.user_id = coalesce(p_user_id, (select auth.uid()))
         )
       )
   );
 $$;
 
-create or replace function public.is_project_admin(p_project_id uuid, p_user_id uuid default auth.uid())
+create or replace function public.is_project_admin(p_project_id uuid, p_user_id uuid default null)
 returns boolean
 language sql
 security definer
@@ -472,13 +473,13 @@ as $$
   select exists (
     select 1
     from public.projects p
-    where p.id = p_project_id and p.user_id = p_user_id
+    where p.id = p_project_id and p.user_id = coalesce(p_user_id, (select auth.uid()))
   )
   or exists (
     select 1
     from public.project_members pm
     where pm.project_id = p_project_id
-      and pm.user_id = p_user_id
+      and pm.user_id = coalesce(p_user_id, (select auth.uid()))
       and pm.role = 'admin'
   );
 $$;
@@ -493,12 +494,12 @@ as $$
   select case
     when exists (
       select 1 from public.projects p
-      where p.id = p_project_id and p.user_id = auth.uid()
-    ) then 'admin'
+      where p.id = p_project_id and p.user_id = (select auth.uid())
+    ) then 'owner'
     else (
       select pm.role
       from public.project_members pm
-      where pm.project_id = p_project_id and pm.user_id = auth.uid()
+      where pm.project_id = p_project_id and pm.user_id = (select auth.uid())
     )
   end;
 $$;
@@ -560,7 +561,15 @@ drop policy if exists "Project owners can delete projects" on public.projects;
 
 create policy "Project members can view projects"
   on public.projects for select
-  using (public.can_access_project(id));
+  using (
+    (select auth.uid()) = user_id
+    or exists (
+      select 1
+      from public.project_members pm
+      where pm.project_id = id
+        and pm.user_id = (select auth.uid())
+    )
+  );
 
 create policy "Project admins can update projects"
   on public.projects for update
@@ -1100,7 +1109,7 @@ delete from public.project_members pm
 using public.projects p
 where pm.project_id = p.id and pm.user_id = p.user_id;
 
-create or replace function public.is_project_owner(p_project_id uuid, p_user_id uuid default auth.uid())
+create or replace function public.is_project_owner(p_project_id uuid, p_user_id uuid default null)
 returns boolean
 language sql
 security definer
@@ -1110,11 +1119,12 @@ as $$
   select exists (
     select 1
     from public.projects p
-    where p.id = p_project_id and p.user_id = p_user_id
+    where p.id = p_project_id
+      and p.user_id = coalesce(p_user_id, (select auth.uid()))
   );
 $$;
 
-create or replace function public.is_project_admin(p_project_id uuid, p_user_id uuid default auth.uid())
+create or replace function public.is_project_admin(p_project_id uuid, p_user_id uuid default null)
 returns boolean
 language sql
 security definer
@@ -1126,7 +1136,7 @@ as $$
     select 1
     from public.project_members pm
     where pm.project_id = p_project_id
-      and pm.user_id = p_user_id
+      and pm.user_id = coalesce(p_user_id, (select auth.uid()))
       and pm.role = 'admin'
   );
 $$;
@@ -1143,9 +1153,52 @@ as $$
     else (
       select pm.role
       from public.project_members pm
-      where pm.project_id = p_project_id and pm.user_id = auth.uid()
+      where pm.project_id = p_project_id
+        and pm.user_id = (select auth.uid())
     )
   end;
+$$;
+
+create or replace function public.get_my_projects()
+returns table (
+  id uuid,
+  name text,
+  github_repo text,
+  slack_webhook text,
+  runbooks text,
+  created_at timestamptz,
+  my_role text
+)
+language sql
+security invoker
+set search_path = public
+stable
+as $$
+  select
+    p.id,
+    p.name,
+    p.github_repo,
+    p.slack_webhook,
+    p.runbooks,
+    p.created_at,
+    'owner'::text as my_role
+  from public.projects p
+  where p.user_id = auth.uid()
+
+  union all
+
+  select
+    p.id,
+    p.name,
+    p.github_repo,
+    p.slack_webhook,
+    p.runbooks,
+    p.created_at,
+    pm.role as my_role
+  from public.project_members pm
+  inner join public.projects p on p.id = pm.project_id
+  where pm.user_id = auth.uid()
+    and p.user_id <> auth.uid();
 $$;
 
 create or replace function public.add_project_owner_member()
@@ -1614,6 +1667,7 @@ end;
 $$;
 
 grant execute on function public.is_project_owner(uuid, uuid) to authenticated;
+grant execute on function public.get_my_projects() to authenticated;
 grant execute on function public.get_my_pending_invitations() to authenticated;
 grant execute on function public.revoke_project_invitation(uuid) to authenticated;
 grant execute on function public.set_project_member_role(uuid, text) to authenticated;
@@ -1621,3 +1675,262 @@ grant execute on function public.leave_project(uuid) to authenticated;
 grant execute on function public.transfer_project_ownership(uuid, uuid) to authenticated;
 grant execute on function public.request_project_edit(uuid, text, text, text, text) to authenticated;
 grant execute on function public.review_project_edit_request(uuid, boolean) to authenticated;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 9. Security hardening (re-run safe if project visibility was too permissive)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+alter table public.projects enable row level security;
+
+drop policy if exists "Users can view their own projects" on public.projects;
+drop policy if exists "Project members can view projects" on public.projects;
+create policy "Project members can view projects"
+  on public.projects for select
+  using (
+    (select auth.uid()) = user_id
+    or exists (
+      select 1
+      from public.project_members pm
+      where pm.project_id = id
+        and pm.user_id = (select auth.uid())
+    )
+  );
+
+drop policy if exists "Users can insert their own projects" on public.projects;
+create policy "Users can insert their own projects"
+  on public.projects for insert
+  with check ((select auth.uid()) = user_id);
+
+create or replace function public.can_access_project(p_project_id uuid, p_user_id uuid default null)
+returns boolean
+language sql
+security definer
+set search_path = ''
+stable
+as $$
+  select exists (
+    select 1
+    from public.projects p
+    where p.id = p_project_id
+      and (
+        p.user_id = coalesce(p_user_id, (select auth.uid()))
+        or exists (
+          select 1
+          from public.project_members pm
+          where pm.project_id = p.id
+            and pm.user_id = coalesce(p_user_id, (select auth.uid()))
+        )
+      )
+  );
+$$;
+
+create or replace function public.is_project_owner(p_project_id uuid, p_user_id uuid default null)
+returns boolean
+language sql
+security definer
+set search_path = ''
+stable
+as $$
+  select exists (
+    select 1
+    from public.projects p
+    where p.id = p_project_id
+      and p.user_id = coalesce(p_user_id, (select auth.uid()))
+  );
+$$;
+
+create or replace function public.is_project_admin(p_project_id uuid, p_user_id uuid default null)
+returns boolean
+language sql
+security definer
+set search_path = ''
+stable
+as $$
+  select public.is_project_owner(p_project_id, p_user_id)
+  or exists (
+    select 1
+    from public.project_members pm
+    where pm.project_id = p_project_id
+      and pm.user_id = coalesce(p_user_id, (select auth.uid()))
+      and pm.role = 'admin'
+  );
+$$;
+
+create or replace function public.get_my_project_role(p_project_id uuid)
+returns text
+language sql
+security definer
+set search_path = ''
+stable
+as $$
+  select case
+    when public.is_project_owner(p_project_id) then 'owner'
+    else (
+      select pm.role
+      from public.project_members pm
+      where pm.project_id = p_project_id
+        and pm.user_id = (select auth.uid())
+    )
+  end;
+$$;
+
+create or replace function public.get_my_projects()
+returns table (
+  id uuid,
+  name text,
+  github_repo text,
+  slack_webhook text,
+  runbooks text,
+  created_at timestamptz,
+  my_role text
+)
+language sql
+security invoker
+set search_path = public
+stable
+as $$
+  select
+    p.id,
+    p.name,
+    p.github_repo,
+    p.slack_webhook,
+    p.runbooks,
+    p.created_at,
+    'owner'::text as my_role
+  from public.projects p
+  where p.user_id = auth.uid()
+
+  union all
+
+  select
+    p.id,
+    p.name,
+    p.github_repo,
+    p.slack_webhook,
+    p.runbooks,
+    p.created_at,
+    pm.role as my_role
+  from public.project_members pm
+  inner join public.projects p on p.id = pm.project_id
+  where pm.user_id = auth.uid()
+    and p.user_id <> auth.uid();
+$$;
+
+grant execute on function public.get_my_projects() to authenticated;
+
+create or replace function public.can_access_project(p_project_id uuid, p_user_id uuid default null)
+returns boolean
+language sql
+security definer
+set search_path = ''
+stable
+as $$
+  select exists (
+    select 1
+    from public.projects p
+    where p.id = p_project_id
+      and (
+        p.user_id = coalesce(p_user_id, (select auth.uid()))
+        or exists (
+          select 1
+          from public.project_members pm
+          where pm.project_id = p.id
+            and pm.user_id = coalesce(p_user_id, (select auth.uid()))
+        )
+      )
+  );
+$$;
+
+create or replace function public.is_project_owner(p_project_id uuid, p_user_id uuid default null)
+returns boolean
+language sql
+security definer
+set search_path = ''
+stable
+as $$
+  select exists (
+    select 1
+    from public.projects p
+    where p.id = p_project_id
+      and p.user_id = coalesce(p_user_id, (select auth.uid()))
+  );
+$$;
+
+create or replace function public.is_project_admin(p_project_id uuid, p_user_id uuid default null)
+returns boolean
+language sql
+security definer
+set search_path = ''
+stable
+as $$
+  select public.is_project_owner(p_project_id, p_user_id)
+  or exists (
+    select 1
+    from public.project_members pm
+    where pm.project_id = p_project_id
+      and pm.user_id = coalesce(p_user_id, (select auth.uid()))
+      and pm.role = 'admin'
+  );
+$$;
+
+create or replace function public.get_my_project_role(p_project_id uuid)
+returns text
+language sql
+security definer
+set search_path = ''
+stable
+as $$
+  select case
+    when public.is_project_owner(p_project_id) then 'owner'
+    else (
+      select pm.role
+      from public.project_members pm
+      where pm.project_id = p_project_id
+        and pm.user_id = (select auth.uid())
+    )
+  end;
+$$;
+
+create or replace function public.get_my_projects()
+returns table (
+  id uuid,
+  name text,
+  github_repo text,
+  slack_webhook text,
+  runbooks text,
+  created_at timestamptz,
+  my_role text
+)
+language sql
+security invoker
+set search_path = public
+stable
+as $$
+  select
+    p.id,
+    p.name,
+    p.github_repo,
+    p.slack_webhook,
+    p.runbooks,
+    p.created_at,
+    'owner'::text as my_role
+  from public.projects p
+  where p.user_id = auth.uid()
+
+  union all
+
+  select
+    p.id,
+    p.name,
+    p.github_repo,
+    p.slack_webhook,
+    p.runbooks,
+    p.created_at,
+    pm.role as my_role
+  from public.project_members pm
+  inner join public.projects p on p.id = pm.project_id
+  where pm.user_id = auth.uid()
+    and p.user_id <> auth.uid();
+$$;
+
+grant execute on function public.get_my_projects() to authenticated;
