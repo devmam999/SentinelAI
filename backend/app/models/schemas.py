@@ -90,8 +90,28 @@ class IncidentRequest(BaseModel):
     post_to_slack: bool = True
 
 
+class SlackValidateRequest(BaseModel):
+    webhook_url: str = Field(..., min_length=1)
+
+
+class SlackValidateResponse(BaseModel):
+    valid: bool = True
+
+
+class GithubValidateResponse(BaseModel):
+    valid: bool = True
+    owner: str
+    name: str
+    full_name: str
+    private: bool = False
+
+
 class IncidentResponse(BaseModel):
     analysis: IncidentAnalysis
     slack_posted: bool
+    slack_error: str | None = Field(
+        default=None,
+        description="Set when post_to_slack was requested but the webhook call failed.",
+    )
     scanned_commits: int
     runbook_matches: list[RunbookMatch] = Field(default_factory=list)

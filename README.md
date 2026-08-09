@@ -36,9 +36,9 @@ Alert ─▶ FastAPI backend
 ```
 
 The **frontend** (React) lets users sign up with a username, create and join
-projects (GitHub repo, Slack webhook, runbooks), collaborate via **roles and
-invitations**, manage account settings, and run incident analyses with
-**fix approval workflows**. **Supabase** handles authentication, profiles,
+projects (GitHub repo, Slack webhook, runbooks — **validated against GitHub and
+Slack before save**), collaborate via **roles and invitations**, manage account
+settings, and run incident analyses with **fix approval workflows**. **Supabase** handles authentication, profiles,
 projects, team membership, invitations, persisted incidents, and runbook
 storage. The **backend** (FastAPI, Docker) runs the AI incident pipeline and
 persists ChromaDB vectors on a dedicated volume.
@@ -153,7 +153,9 @@ structured JSON mapped to `IncidentAnalysis`:
 - **`suggested_runbook`** — chosen from the **vector-retrieved** runbook titles
 - Plus likely cause, confidence, affected services, and next steps
 
-That output is shown in the UI and optionally posted to Slack.
+That output is shown in the UI and optionally posted to Slack. If the webhook is
+invalid or revoked, analysis and incident save still succeed; Slack failure is
+returned as `slack_error` and shown as a warning on the project page.
 
 **Why RAG for runbooks?** Without retrieval, the model would invent runbook names
 and fixes. Vector search grounds `suggested_runbook` in documents you uploaded.
@@ -213,7 +215,7 @@ SentinelAI/
 │   │   │   ├── gemini_service.py
 │   │   │   ├── runbook_validation_service.py  # Semantic section checks + PDF parsing
 │   │   │   └── incident_service.py
-│   │   └── api/routes/           # health, github, runbooks, incidents
+│   │   └── api/routes/           # health, github, slack, runbooks, incidents
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   ├── docker-compose.yml        # Backend + chroma-data volume
@@ -268,8 +270,14 @@ database**, and **runbook file storage**.
    | 6 | **`runbooks` private storage bucket** + per-user policies |
    | 7 | **`project_members`**, **`project_invitations`**, **`incidents`**, **`incident_fixes`** + team/incident RPCs |
    | 8 | **`project_edit_requests`**, ownership transfer, leave project, role management |
+   | **9** | **Security hardening** — stricter RLS on `projects` / `project_members`, `can_access_project`, and **`SECURITY DEFINER`** RPCs so invited users can list and open shared projects (see [Row Level Security](#row-level-security-rls) below) |
    | RPCs | Auth: `resolve_login_email`, `is_username_available`, `update_username`, `delete_own_account` |
    | | Teams: `invite_project_member`, `accept_project_invitation`, `get_my_pending_invitations`, `transfer_project_ownership`, `leave_project`, … |
+   | | Access: **`get_my_projects()`**, **`get_accessible_project(uuid)`**, `get_my_project_role(uuid)` |
+
+   **Important:** If you set up the database before team/invite fixes landed, re-run the full
+   [`supabase/schema.sql`](supabase/schema.sql) in the SQL Editor (it is idempotent). Section **9**
+   at the bottom must be applied so invitees see shared projects with the correct role.
 
    **Username rules** (enforced in app + DB): max 20 characters, no spaces,
    unique case-insensitively.
@@ -280,6 +288,32 @@ database**, and **runbook file storage**.
    - **Project URL**: Integrations → Data API → base URL (drop `/rest/v1`)
 
    See [`.env.example`](.env.example) for step-by-step dashboard navigation.
+
+### Row Level Security (RLS)
+
+Supabase **Row Level Security** controls which rows each signed-in user can read or
+write. SentinelAI uses RLS on `profiles`, `projects`, `project_members`,
+invitations, incidents, and related tables so users only see data for projects
+they own or were invited to.
+
+
+Section **9** in [`supabase/schema.sql`](supabase/schema.sql) fhas:
+
+| Piece | Purpose |
+| ----- | ------- |
+| **`can_access_project(project_id)`** | `SECURITY DEFINER` helper — true if the current user is the project owner or a member |
+| **RLS on `projects`** | Select allowed for owners **or** members (not every authenticated user) |
+| **RLS on `project_members`** | Users can read **their own** membership rows; teammates can list the team when `can_access_project` passes |
+| **`get_my_projects()`** | `SECURITY DEFINER` — returns owned projects (role `owner`) **union** joined projects (role `admin` / `user`) for the dashboard |
+| **`get_accessible_project(uuid)`** | `SECURITY DEFINER` — returns one project + **`my_role`** if the caller may open it; used on the project detail page |
+| **`get_my_project_role(uuid)`** | Resolves owner vs admin vs user for permission checks in the UI |
+
+The frontend (`src/lib/projectTeam.ts`) calls these RPCs first and falls back to
+direct table queries only when needed. Project detail loading uses
+`.maybeSingle()` and checks role **before** rendering owner-only actions.
+
+**Re-run section 9** after pulling updates if invitees still cannot see shared
+projects or if everyone incorrectly appears as Owner.
 
 ---
 
@@ -322,7 +356,7 @@ variables only).
 | **Verify email** | `/verify-email` — resend confirmation or sign out; dashboard and protected routes require verified email |
 | **Dashboard header** | Shows **username**; **notifications bell** (pending project invites); **Settings**; red **Sign out** |
 | **Settings** | Change username (instant), email (confirmation to new address), password (new + confirm); delete account via `sudo delete [username]` modal |
-| **Projects** | Create/edit with GitHub repo, Slack webhook ([get one from Slack apps](https://api.slack.com/apps)), runbooks |
+| **Projects** | Create/edit with GitHub repo, Slack webhook ([get one from Slack apps](https://api.slack.com/apps)), runbooks — **GitHub repo and Slack webhook are verified by the backend before save** (see [Integration validation](#integration-validation-github--slack)) |
 | **Delete project** | Owner only — dashboard trash icon → confirm → type `sudo delete [Project Name]` |
 | **Runbooks** | `.md` or `.pdf`; must include four sections (validated semantically on upload) |
 
@@ -370,6 +404,36 @@ Each project has three roles. The dashboard lists projects you **own** and proje
 - Analyses are saved as **incidents** in Supabase (not just ephemeral UI state).
 - Teammates propose a fix description; owners/admins **accept** or **decline** it (or auto-resolve if they have permission).
 - Resolved incidents appear in project history.
+- **Slack posting is best-effort:** if analysis succeeds but the webhook fails (e.g. revoked URL, `no_service`), the incident is still saved and the UI shows a **warning** with a clear Slack error — analysis is not rolled back.
+
+### Integration validation (GitHub & Slack)
+
+When you **Create project** (or save edits that change GitHub/Slack fields), the
+frontend calls the backend **before** writing to Supabase:
+
+| Check | Endpoint | What it does |
+| ----- | -------- | ------------ |
+| **GitHub repo** | `GET /api/github/validate?repo=…` | Parses URL or `owner/name`, calls GitHub `GET /repos/{owner}/{repo}` with `GITHUB_TOKEN` — confirms the repo exists and is readable |
+| **Slack webhook** | `POST /api/slack/validate` | Validates Incoming Webhook URL shape, sends a one-line test message; Slack must respond with `ok` |
+
+If either check fails, **the project is not created** and the form shows a combined
+error (e.g. *GitHub: Repository not found…* / *Slack: The Slack webhook URL is
+invalid, disabled, or was revoked…*).
+
+**Requirements**
+
+- Backend must be running (`docker compose up --build`) and `VITE_API_URL` must
+  point at it — same as runbook validation.
+- **Private GitHub repos** need a valid `GITHUB_TOKEN` in `backend/.env.local`
+  with read access to that repo.
+- Use a real **Incoming Webhook** URL from [api.slack.com/apps](https://api.slack.com/apps)
+  (`https://hooks.slack.com/services/T…/B…/…`), not a Slack Workflow link.
+
+**Edit mode:** GitHub and Slack are re-validated only when those fields change
+(so saving the project name alone does not send another Slack test message).
+
+**Slack validation message:** *“SentinelAI webhook validation — you can ignore
+this message.”* — one post per changed webhook URL.
 
 ---
 
@@ -486,6 +550,10 @@ to apply the deferred-profile triggers and remove any old unconfirmed profile ro
 | PKCE code verifier not found | Update the Confirm signup email template (see above) and resend confirmation |
 | Runbook upload / analyze fails | `VITE_API_URL` unset on Vercel → browser calls localhost |
 | CORS error from frontend | `FRONTEND_URL` missing/wrong on Render |
+| **`Upstream error: no_service`** (analyze) | Invalid or revoked Slack webhook — update the project’s Incoming Webhook URL; incident analysis still saves after the Slack best-effort fix, with a warning in the UI |
+| **Create project blocked** — GitHub error | Repo URL wrong, repo missing, or private repo without `GITHUB_TOKEN` on the backend |
+| **Create project blocked** — Slack error | Webhook disabled/revoked/wrong URL; regenerate at [api.slack.com/apps](https://api.slack.com/apps) |
+| Invitee dashboard empty / wrong Owner role | Re-run full [`supabase/schema.sql`](supabase/schema.sql), especially **section 9** (RLS + `get_my_projects` / `get_accessible_project`) |
 
 ---
 
@@ -517,13 +585,15 @@ to apply the deferred-profile triggers and remove any old unconfirmed profile ro
 | Method | Path | Description |
 | ------ | ---- | ----------- |
 | GET | `/health` | Liveness + configured integrations |
+| GET | `/api/github/validate` | Verify repo exists and is readable (`?repo=owner/name` or URL) |
 | GET | `/api/github/commits` | Recent commits for `?repo=owner/name` |
 | GET | `/api/github/deployments` | Recent deployments |
+| POST | `/api/slack/validate` | Verify Slack Incoming Webhook URL (sends test message) |
 | POST | `/api/runbooks/validate-file` | Upload `.md`/`.pdf`; semantic section validation |
 | POST | `/api/runbooks/index-file` | Parse + index a runbook file into ChromaDB |
 | POST | `/api/runbooks` | Index runbook JSON body |
 | GET | `/api/runbooks/search` | Semantic search (`?q=...`) |
-| POST | `/api/incidents/analyze` | Full pipeline → analysis + optional Slack post |
+| POST | `/api/incidents/analyze` | Full pipeline → analysis; Slack post is **best-effort** (`slack_posted`, optional `slack_error`) |
 | POST | `/api/incidents/notify` | Post a pre-built analysis to Slack |
 
 Interactive docs: <http://localhost:8000/docs>
@@ -537,6 +607,18 @@ heading text):
 2. How to test or verify that it works
 3. What common errors or symptoms to look for
 4. What action to take for each error
+
+### Example: validate GitHub repo and Slack webhook
+
+```bash
+# GitHub — repo URL or owner/name
+curl "http://localhost:8000/api/github/validate?repo=your-org/your-repo"
+
+# Slack — Incoming Webhook URL (sends a short test message to the channel)
+curl -X POST http://localhost:8000/api/slack/validate \
+  -H 'Content-Type: application/json' \
+  -d '{"webhook_url": "https://hooks.slack.com/services/XXX/YYY/ZZZ"}'
+```
 
 ### Example: analyze an incident
 
@@ -560,11 +642,15 @@ curl -X POST http://localhost:8000/api/incidents/analyze \
 2. **Sign up** with a username, email, and strong password; confirm email.
 3. On the dashboard, click **New Project** — add a GitHub repo, Slack webhook
    (from <https://api.slack.com/apps>), and upload runbooks (`.md` / `.pdf`).
+   The backend **validates GitHub and Slack** before the project is saved; fix
+   any errors shown on the form.
 4. **Invite teammates** from the project page (**Invite** → Team & permissions).
-   They accept from the **notifications bell** on their dashboard.
+   They accept from the **notifications bell** on their dashboard (shared
+   projects appear after section **9** RLS is applied in Supabase).
 5. Open the project and click **Analyze Incident**. Sentinel validates and
    indexes runbooks, scans commits, reasons with Gemini, saves the incident,
-   shows results on the page, and posts to Slack when a webhook is configured.
+   shows results on the page, and posts to Slack when the webhook is valid.
+   If Slack fails, the incident is still saved and a warning explains the webhook issue.
 6. Teammates **propose fixes**; owners/admins review pending fixes on the project
    page (or resolve directly if permitted).
 7. Use **Settings** to update username, email, or password, or delete your

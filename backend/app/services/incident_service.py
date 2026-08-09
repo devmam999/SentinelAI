@@ -13,6 +13,7 @@ event loop stays responsive.
 
 from __future__ import annotations
 
+import httpx
 from fastapi.concurrency import run_in_threadpool
 
 from ..config import get_settings
@@ -39,16 +40,23 @@ async def analyze_and_notify(request: IncidentRequest) -> IncidentResponse:
         gemini_service.analyze_incident, request, commits, deployments, runbooks
     )
 
-    # 4. Slack notification.
+    # 4. Slack notification (best-effort — analysis should still succeed).
     webhook = request.slack_webhook_url or settings.slack_webhook_url
     slack_posted = False
+    slack_error: str | None = None
     if request.post_to_slack and webhook:
-        await slack_service.post_incident(webhook, analysis)
-        slack_posted = True
+        try:
+            await slack_service.post_incident(webhook, analysis)
+            slack_posted = True
+        except httpx.HTTPStatusError as exc:
+            slack_error = slack_service.format_webhook_error(exc.response)
+        except httpx.HTTPError as exc:
+            slack_error = f"Slack webhook failed: {exc}"
 
     return IncidentResponse(
         analysis=analysis,
         slack_posted=slack_posted,
+        slack_error=slack_error,
         scanned_commits=len(commits),
         runbook_matches=runbooks,
     )

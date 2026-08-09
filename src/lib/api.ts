@@ -43,9 +43,22 @@ export type RunbookValidateResult = {
   missing_sections: string[]
 }
 
+export type GithubValidateResult = {
+  valid: boolean
+  owner: string
+  name: string
+  full_name: string
+  private: boolean
+}
+
+export type SlackValidateResult = {
+  valid: boolean
+}
+
 export type IncidentResponse = {
   analysis: IncidentAnalysis
   slack_posted: boolean
+  slack_error?: string | null
   scanned_commits: number
   runbook_matches: RunbookMatch[]
 }
@@ -77,6 +90,25 @@ export async function analyzeIncident(input: AnalyzeInput): Promise<IncidentResp
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
+  })
+  if (!res.ok) throw new Error(await parseError(res))
+  return res.json()
+}
+
+/** Confirm a GitHub repository exists and is readable by the backend. */
+export async function validateGithubRepo(repo: string): Promise<GithubValidateResult> {
+  const params = new URLSearchParams({ repo: repo.trim() })
+  const res = await fetch(`${requireApiUrl()}/api/github/validate?${params}`)
+  if (!res.ok) throw new Error(await parseError(res))
+  return res.json()
+}
+
+/** Confirm a Slack Incoming Webhook URL is active. */
+export async function validateSlackWebhook(webhookUrl: string): Promise<SlackValidateResult> {
+  const res = await fetch(`${requireApiUrl()}/api/slack/validate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ webhook_url: webhookUrl.trim() }),
   })
   if (!res.ok) throw new Error(await parseError(res))
   return res.json()

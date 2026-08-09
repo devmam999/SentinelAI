@@ -3,10 +3,28 @@
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
-from ...models.schemas import CommitInfo, DeploymentInfo
+from ...models.schemas import CommitInfo, DeploymentInfo, GithubValidateResponse
 from ...services import github_service
 
 router = APIRouter(prefix="/api/github", tags=["github"])
+
+
+@router.get("/validate", response_model=GithubValidateResponse)
+async def validate(
+    repo: str = Query(..., description="Repo URL or 'owner/name'."),
+) -> GithubValidateResponse:
+    """Confirm a GitHub repository exists and is readable before saving a project."""
+
+    try:
+        owner, name = github_service.parse_repo(repo)
+        info = await github_service.verify_repo_access(owner, name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=400, detail=github_service.format_api_error(exc.response)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not reach GitHub: {exc}") from exc
+    return GithubValidateResponse(**info)
 
 
 @router.get("/commits", response_model=list[CommitInfo])

@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ...models.schemas import IncidentAnalysis, IncidentRequest, IncidentResponse
 from ...services import incident_service, slack_service
+from ...services.slack_service import format_webhook_error
 from ...services.gemini_errors import format_rate_limit_message, is_rate_limit_error
 
 router = APIRouter(prefix="/api/incidents", tags=["incidents"])
@@ -30,6 +31,11 @@ async def analyze(request: IncidentRequest) -> IncidentResponse:
                     "with repo read access), then restart the backend."
                 ),
             ) from exc
+        if "hooks.slack.com" in str(exc.request.url):
+            raise HTTPException(
+                status_code=502,
+                detail=format_webhook_error(exc.response),
+            ) from exc
         # Never forward redirect/non-JSON upstream statuses (e.g. 301) to the browser —
         # browsers treat those as CORS failures on cross-origin fetch().
         raise HTTPException(
@@ -51,6 +57,8 @@ async def notify(
 
     try:
         await slack_service.post_incident(webhook, analysis)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=format_webhook_error(exc.response)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Slack error: {exc}") from exc
     return {"status": "sent"}

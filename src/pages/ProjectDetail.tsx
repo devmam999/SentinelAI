@@ -16,6 +16,7 @@ import {
   fetchPendingEditRequests,
   fetchProjectIncidents,
   fetchProjectInvitations,
+  fetchAccessibleProject,
   fetchProjectTeam,
   getMyProjectRole,
   reviewIncidentFix,
@@ -72,6 +73,7 @@ export default function ProjectDetail() {
   const [alertText, setAlertText] = useState('')
   const [analyzing, setAnalyzing] = useState(false)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
+  const [analyzeWarning, setAnalyzeWarning] = useState<string | null>(null)
   const [resolveTarget, setResolveTarget] = useState<IncidentWithFix | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
   const [reviewingFixId, setReviewingFixId] = useState<string | null>(null)
@@ -86,7 +88,7 @@ export default function ProjectDetail() {
   const reloadTeam = useCallback(async () => {
     if (!id) return
     const [{ data }, nextTeam, nextInvitations, nextEditRequests] = await Promise.all([
-      supabase.from('projects').select('*').eq('id', id).single(),
+      supabase.from('projects').select('*').eq('id', id).maybeSingle(),
       fetchProjectTeam(id),
       fetchProjectInvitations(id),
       fetchPendingEditRequests(id),
@@ -130,33 +132,17 @@ export default function ProjectDetail() {
         return
       }
 
-      const [{ data, error: projectError }, role] = await Promise.all([
-        supabase.from('projects').select('*').eq('id', id).single(),
-        getMyProjectRole(id!),
-      ])
+      const { project: data, role: verifiedRole, error: loadError } = await fetchAccessibleProject(id!)
 
       if (!active) return
 
-      if (projectError || !data) {
-        setError(projectError?.message ?? 'Project not found.')
+      if (loadError) {
+        setError(loadError)
         setLoading(false)
         return
       }
 
-      if (!role) {
-        setError('You do not have access to this project.')
-        setLoading(false)
-        return
-      }
-
-      const verifiedRole =
-        data.user_id === user?.id
-          ? 'owner'
-          : role === 'admin' || role === 'member'
-            ? role
-            : null
-
-      if (!verifiedRole) {
+      if (!data || !verifiedRole) {
         setError('You do not have access to this project.')
         setLoading(false)
         return
@@ -213,6 +199,7 @@ export default function ProjectDetail() {
     }
     setAnalyzing(true)
     setAnalyzeError(null)
+    setAnalyzeWarning(null)
     try {
       await indexRunbooksBestEffort()
       const alertDescription = alertText.trim() || 'A production alert fired.'
@@ -234,6 +221,9 @@ export default function ProjectDetail() {
       if (saveError || !incident) {
         setAnalyzeError(saveError ?? 'Could not save incident.')
         return
+      }
+      if (result.slack_error) {
+        setAnalyzeWarning(`Analysis saved, but Slack notification failed: ${result.slack_error}`)
       }
       await reloadIncidents()
       setAlertText('')
@@ -566,6 +556,7 @@ export default function ProjectDetail() {
             </div>
 
             {analyzeError && <div style={{ ...errorStyle, marginBottom: 12 }}>{analyzeError}</div>}
+            {analyzeWarning && <div style={{ ...warningStyle, marginBottom: 12 }}>{analyzeWarning}</div>}
 
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
               <input
@@ -1067,6 +1058,16 @@ const errorStyle: React.CSSProperties = {
   color: '#ff8a8a',
   background: 'rgba(255,95,95,0.08)',
   border: '1px solid rgba(255,95,95,0.25)',
+  borderRadius: 8,
+  padding: '16px 18px',
+}
+
+const warningStyle: React.CSSProperties = {
+  fontFamily: 'var(--font-inter)',
+  fontSize: '0.88rem',
+  color: '#f5c76b',
+  background: 'rgba(245,199,107,0.08)',
+  border: '1px solid rgba(245,199,107,0.25)',
   borderRadius: 8,
   padding: '16px 18px',
 }

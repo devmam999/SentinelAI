@@ -90,11 +90,32 @@ export function canAutoResolveIncidents(role: ProjectRole | null): boolean {
 }
 
 export async function getMyProjectRole(projectId: string): Promise<ProjectRole | null> {
+  const { data, error } = await supabase.rpc('get_my_project_role', { p_project_id: projectId })
+
+  if (!error && data) {
+    if (data === 'owner' || data === 'admin' || data === 'member') {
+      return data
+    }
+  }
+
   const {
     data: { user },
   } = await supabase.auth.getUser()
 
   if (!user) return null
+
+  const { data: membership, error: membershipError } = await supabase
+    .from('project_members')
+    .select('role')
+    .eq('project_id', projectId)
+    .eq('user_id', user.id)
+    .maybeSingle()
+
+  if (!membershipError && membership) {
+    if (membership.role === 'admin' || membership.role === 'member') {
+      return membership.role as ProjectRole
+    }
+  }
 
   const { data: project, error: projectError } = await supabase
     .from('projects')
@@ -105,18 +126,6 @@ export async function getMyProjectRole(projectId: string): Promise<ProjectRole |
   if (projectError || !project) return null
   if (project.user_id === user.id) return 'owner'
 
-  const { data: membership, error: membershipError } = await supabase
-    .from('project_members')
-    .select('role')
-    .eq('project_id', projectId)
-    .eq('user_id', user.id)
-    .maybeSingle()
-
-  if (membershipError || !membership) return null
-  if (membership.role === 'admin' || membership.role === 'member') {
-    return membership.role as ProjectRole
-  }
-
   return null
 }
 
@@ -124,6 +133,58 @@ function resolveProjectRole(projectUserId: string, currentUserId: string, member
   if (projectUserId === currentUserId) return 'owner'
   if (membershipRole === 'admin' || membershipRole === 'member') return membershipRole
   return null
+}
+
+export type AccessibleProject = {
+  id: string
+  name: string
+  github_repo: string | null
+  slack_webhook: string | null
+  runbooks: string | null
+  created_at: string
+  user_id: string
+}
+
+export async function fetchAccessibleProject(projectId: string): Promise<{
+  project: AccessibleProject | null
+  role: ProjectRole | null
+  error: string | null
+}> {
+  const { data: rpcRows, error: rpcError } = await supabase.rpc('get_accessible_project', {
+    p_project_id: projectId,
+  })
+
+  if (!rpcError && Array.isArray(rpcRows) && rpcRows.length > 0) {
+    const row = rpcRows[0] as AccessibleProject & { my_role: string }
+    if (row.my_role === 'owner' || row.my_role === 'admin' || row.my_role === 'member') {
+      return { project: row, role: row.my_role as ProjectRole, error: null }
+    }
+  }
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) return { project: null, role: null, error: 'Not signed in' }
+
+  const role = await getMyProjectRole(projectId)
+  if (!role) return { project: null, role: null, error: null }
+
+  const { data, error } = await supabase
+    .from('projects')
+    .select('id, name, github_repo, slack_webhook, runbooks, created_at, user_id')
+    .eq('id', projectId)
+    .maybeSingle()
+
+  if (error) return { project: null, role: null, error: error.message }
+  if (!data) return { project: null, role: null, error: null }
+
+  const verifiedRole =
+    data.user_id === user.id ? 'owner' : role === 'admin' || role === 'member' ? role : null
+
+  if (!verifiedRole) return { project: null, role: null, error: null }
+
+  return { project: data, role: verifiedRole, error: null }
 }
 
 type ProjectRow = {
@@ -134,6 +195,16 @@ type ProjectRow = {
   runbooks: string | null
   created_at: string
   user_id: string
+}
+
+type MyProjectRpcRow = {
+  id: string
+  name: string
+  github_repo: string | null
+  slack_webhook: string | null
+  runbooks: string | null
+  created_at: string
+  my_role: string
 }
 
 function sortProjects(projects: DashboardProject[]) {
@@ -152,12 +223,32 @@ function toDashboardProject(project: Omit<ProjectRow, 'user_id'>, myRole: Projec
   }
 }
 
+function mapRpcProjects(rows: MyProjectRpcRow[]): DashboardProject[] {
+  return rows
+    .filter((row) => row.my_role === 'owner' || row.my_role === 'admin' || row.my_role === 'member')
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      github_repo: row.github_repo,
+      slack_webhook: row.slack_webhook,
+      runbooks: row.runbooks,
+      created_at: row.created_at,
+      my_role: row.my_role as ProjectRole,
+    }))
+}
+
 export async function fetchMyProjects(): Promise<{ projects: DashboardProject[]; error: string | null }> {
   const {
     data: { user },
   } = await supabase.auth.getUser()
 
   if (!user) return { projects: [], error: 'Not signed in' }
+
+  const { data: rpcProjects, error: rpcError } = await supabase.rpc('get_my_projects')
+
+  if (!rpcError && Array.isArray(rpcProjects)) {
+    return { projects: sortProjects(mapRpcProjects(rpcProjects as MyProjectRpcRow[])), error: null }
+  }
 
   const byId = new Map<string, DashboardProject>()
 
@@ -218,7 +309,7 @@ async function profileForUser(userId: string) {
 }
 
 export async function fetchProjectTeam(projectId: string): Promise<TeamMember[]> {
-  const { data: project } = await supabase.from('projects').select('user_id').eq('id', projectId).single()
+  const { data: project } = await supabase.from('projects').select('user_id').eq('id', projectId).maybeSingle()
   const { data: members, error } = await supabase
     .from('project_members')
     .select('id, user_id, role')

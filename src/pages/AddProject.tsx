@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate, useParams, Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
-import { validateRunbookFile } from '../lib/api'
+import { isApiConfigured, validateGithubRepo, validateRunbookFile, validateSlackWebhook } from '../lib/api'
 import { formatApiError, isRateLimitError } from '../lib/formatApiError'
 import { getMyProjectRole, requestProjectEdit, type ProjectRole } from '../lib/projectTeam'
 import * as s from '../components/authStyles'
@@ -37,9 +37,12 @@ export default function AddProject() {
   const [error, setError] = useState<string | null>(null)
   const [runbookErrors, setRunbookErrors] = useState<RunbookFileError[]>([])
   const [validatingRunbooks, setValidatingRunbooks] = useState(false)
+  const [validatingIntegrations, setValidatingIntegrations] = useState(false)
   const [saving, setSaving] = useState(false)
   const [myRole, setMyRole] = useState<ProjectRole | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [originalGithubRepo, setOriginalGithubRepo] = useState('')
+  const [originalSlackWebhook, setOriginalSlackWebhook] = useState('')
   // When editing, load the existing project's values before showing the form.
   const [initializing, setInitializing] = useState(isEditing)
 
@@ -64,6 +67,8 @@ export default function AddProject() {
         setName(data.name ?? '')
         setGithubRepo(data.github_repo ?? '')
         setSlackWebhook(data.slack_webhook ?? '')
+        setOriginalGithubRepo(data.github_repo ?? '')
+        setOriginalSlackWebhook(data.slack_webhook ?? '')
         setExistingRunbooks(
           (data.runbooks ?? '')
             .split(/\n+/)
@@ -156,6 +161,54 @@ export default function AddProject() {
     }
   }
 
+  const validateIntegrations = async (): Promise<string | null> => {
+    const githubChanged = !isEditing || githubRepo.trim() !== originalGithubRepo.trim()
+    const slackChanged = !isEditing || slackWebhook.trim() !== originalSlackWebhook.trim()
+
+    if (!githubChanged && !slackChanged) return null
+
+    if (!isApiConfigured) {
+      return 'Backend URL is not configured. Set VITE_API_URL or run the backend locally on port 8000.'
+    }
+
+    setValidatingIntegrations(true)
+    try {
+      const tasks: Promise<unknown>[] = []
+      if (githubChanged) tasks.push(validateGithubRepo(githubRepo))
+      if (slackChanged) tasks.push(validateSlackWebhook(slackWebhook))
+
+      const results = await Promise.allSettled(tasks)
+      const messages: string[] = []
+      let resultIndex = 0
+
+      if (githubChanged) {
+        const githubResult = results[resultIndex++]
+        if (githubResult.status === 'rejected') {
+          messages.push(
+            githubResult.reason instanceof Error
+              ? `GitHub: ${formatApiError(githubResult.reason.message)}`
+              : 'GitHub: Could not validate repository.',
+          )
+        }
+      }
+
+      if (slackChanged) {
+        const slackResult = results[resultIndex++]
+        if (slackResult.status === 'rejected') {
+          messages.push(
+            slackResult.reason instanceof Error
+              ? `Slack: ${formatApiError(slackResult.reason.message)}`
+              : 'Slack: Could not validate webhook.',
+          )
+        }
+      }
+
+      return messages.length ? messages.join(' ') : null
+    } finally {
+      setValidatingIntegrations(false)
+    }
+  }
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setError(null)
@@ -175,6 +228,12 @@ export default function AddProject() {
     }
     if (!hasValidRunbook) {
       setError('Please upload at least one runbook (.md or .pdf).')
+      return
+    }
+
+    const integrationError = await validateIntegrations()
+    if (integrationError) {
+      setError(integrationError)
       return
     }
 
@@ -590,6 +649,19 @@ export default function AddProject() {
               </div>
             )}
 
+            {validatingIntegrations && (
+              <div
+                style={{
+                  marginBottom: 14,
+                  fontFamily: 'var(--font-jetbrains)',
+                  fontSize: '0.8rem',
+                  color: 'var(--muted-foreground)',
+                }}
+              >
+                Checking GitHub repository and Slack webhook…
+              </div>
+            )}
+
             {isAdminRequest && (
               <div
                 style={{
@@ -671,7 +743,7 @@ export default function AddProject() {
           <div style={{ display: 'flex', gap: 10 }}>
             <button
               type="submit"
-              disabled={saving || validatingRunbooks || !hasValidRunbook}
+              disabled={saving || validatingRunbooks || validatingIntegrations || !hasValidRunbook}
               style={{
                 ...s.primaryButton,
                 width: 'auto',
@@ -681,7 +753,9 @@ export default function AddProject() {
               onMouseEnter={(e) => !saving && (e.currentTarget.style.opacity = '0.85')}
               onMouseLeave={(e) => !saving && (e.currentTarget.style.opacity = '1')}
             >
-              {saving
+              {validatingIntegrations
+                ? 'Validating…'
+                : saving
                 ? 'Saving…'
                 : isEditing
                   ? isAdminRequest

@@ -67,6 +67,49 @@ def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=20, follow_redirects=True)
 
 
+def format_api_error(response: httpx.Response) -> str:
+    """Turn GitHub API failures into actionable validation messages."""
+
+    status = response.status_code
+    if status == 404:
+        return (
+            "Repository not found. Check the URL or owner/name, and ensure the "
+            "repository exists and is accessible."
+        )
+    if status == 401:
+        return (
+            "GitHub authentication failed. Set a valid GITHUB_TOKEN in "
+            "backend/.env.local with read access to this repository, then restart "
+            "the backend."
+        )
+    if status == 403:
+        return (
+            "GitHub access denied. Your token may not have permission to read "
+            "this repository."
+        )
+    body = (response.text or "").strip()
+    if body:
+        return f"GitHub API error ({status}): {body}"
+    return f"GitHub API error ({status} {response.reason_phrase})"
+
+
+async def verify_repo_access(owner: str, repo: str) -> dict[str, str | bool]:
+    """Confirm the repository exists and is readable with the configured token."""
+
+    settings = get_settings()
+    url = f"{settings.github_api_url}/repos/{owner}/{repo}"
+    async with _client() as client:
+        resp = await client.get(url, headers=_headers())
+        resp.raise_for_status()
+        data = resp.json()
+    return {
+        "owner": (data.get("owner") or {}).get("login", owner),
+        "name": data.get("name", repo),
+        "full_name": data.get("full_name", f"{owner}/{repo}"),
+        "private": bool(data.get("private")),
+    }
+
+
 async def list_recent_commits(owner: str, repo: str, limit: int = 30) -> list[CommitInfo]:
     settings = get_settings()
     url = f"{settings.github_api_url}/repos/{owner}/{repo}/commits"
