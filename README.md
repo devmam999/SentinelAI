@@ -688,7 +688,6 @@ to apply the deferred-profile triggers and remove any old unconfirmed profile ro
 | POST | `/api/incidents/postmortem` | Post structured postmortem to Slack when an incident is resolved |
 | POST | `/api/incidents/notify` | Post a pre-built analysis to Slack |
 
-Interactive docs: <http://localhost:8000/docs>
 
 ### Runbook requirements (upload validation)
 
