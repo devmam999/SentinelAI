@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate, useParams, Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
-import { isApiConfigured, validateGithubRepo, validateRunbookFile, validateSlackWebhook } from '../lib/api'
+import { isApiConfigured, logApiError, validateGithubRepo, validateRunbookFile, validateSlackWebhook } from '../lib/api'
 import { formatApiError, isRateLimitError } from '../lib/formatApiError'
 import { getMyProjectRole, requestProjectEdit, type ProjectRole } from '../lib/projectTeam'
 import * as s from '../components/authStyles'
@@ -35,6 +35,8 @@ export default function AddProject() {
   // Newly selected files to upload on save.
   const [files, setFiles] = useState<File[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [githubFieldError, setGithubFieldError] = useState<string | null>(null)
+  const [slackFieldError, setSlackFieldError] = useState<string | null>(null)
   const [runbookErrors, setRunbookErrors] = useState<RunbookFileError[]>([])
   const [validatingRunbooks, setValidatingRunbooks] = useState(false)
   const [validatingIntegrations, setValidatingIntegrations] = useState(false)
@@ -161,14 +163,27 @@ export default function AddProject() {
     }
   }
 
-  const validateIntegrations = async (): Promise<string | null> => {
+  const integrationErrorMessage = (scope: string, err: unknown, fallback: string): string => {
+    logApiError(scope, err)
+    return err instanceof Error ? formatApiError(err.message) : fallback
+  }
+
+  const validateIntegrations = async (): Promise<boolean> => {
     const githubChanged = !isEditing || githubRepo.trim() !== originalGithubRepo.trim()
     const slackChanged = !isEditing || slackWebhook.trim() !== originalSlackWebhook.trim()
 
-    if (!githubChanged && !slackChanged) return null
+    setGithubFieldError(null)
+    setSlackFieldError(null)
+
+    if (!githubChanged && !slackChanged) return true
 
     if (!isApiConfigured) {
-      return 'Backend URL is not configured. Set VITE_API_URL or run the backend locally on port 8000.'
+      const message =
+        'Backend URL is not configured. Set VITE_API_URL or run the backend locally on port 8000.'
+      setGithubFieldError(githubChanged ? message : null)
+      setSlackFieldError(slackChanged ? message : null)
+      console.error('[SentinelAI] Integration validation blocked', { message })
+      return false
     }
 
     setValidatingIntegrations(true)
@@ -178,32 +193,38 @@ export default function AddProject() {
       if (slackChanged) tasks.push(validateSlackWebhook(slackWebhook))
 
       const results = await Promise.allSettled(tasks)
-      const messages: string[] = []
       let resultIndex = 0
+      let hasErrors = false
 
       if (githubChanged) {
         const githubResult = results[resultIndex++]
         if (githubResult.status === 'rejected') {
-          messages.push(
-            githubResult.reason instanceof Error
-              ? `GitHub: ${formatApiError(githubResult.reason.message)}`
-              : 'GitHub: Could not validate repository.',
+          setGithubFieldError(
+            integrationErrorMessage(
+              'GitHub repository validation',
+              githubResult.reason,
+              'Could not validate GitHub repository.',
+            ),
           )
+          hasErrors = true
         }
       }
 
       if (slackChanged) {
         const slackResult = results[resultIndex++]
         if (slackResult.status === 'rejected') {
-          messages.push(
-            slackResult.reason instanceof Error
-              ? `Slack: ${formatApiError(slackResult.reason.message)}`
-              : 'Slack: Could not validate webhook.',
+          setSlackFieldError(
+            integrationErrorMessage(
+              'Slack webhook validation',
+              slackResult.reason,
+              'Could not validate Slack webhook.',
+            ),
           )
+          hasErrors = true
         }
       }
 
-      return messages.length ? messages.join(' ') : null
+      return !hasErrors
     } finally {
       setValidatingIntegrations(false)
     }
@@ -213,6 +234,8 @@ export default function AddProject() {
     e.preventDefault()
     setError(null)
     setNotice(null)
+    setGithubFieldError(null)
+    setSlackFieldError(null)
 
     if (!isSupabaseConfigured) {
       setError('Supabase is not configured yet. Add your credentials to .env.local and restart the dev server.')
@@ -231,11 +254,8 @@ export default function AddProject() {
       return
     }
 
-    const integrationError = await validateIntegrations()
-    if (integrationError) {
-      setError(integrationError)
-      return
-    }
+    const integrationsValid = await validateIntegrations()
+    if (!integrationsValid) return
 
     if (isAdminRequest && id) {
       setSaving(true)
@@ -443,13 +463,27 @@ export default function AddProject() {
               id="github"
               type="text"
               value={githubRepo}
-              onChange={(e) => setGithubRepo(e.target.value)}
+              onChange={(e) => {
+                setGithubRepo(e.target.value)
+                setGithubFieldError(null)
+              }}
               placeholder="https://github.com/your-org/your-repo"
               required
-              style={s.input}
-              onFocus={(e) => (e.target.style.borderColor = 'var(--primary)')}
-              onBlur={(e) => (e.target.style.borderColor = 'var(--border)')}
+              aria-invalid={Boolean(githubFieldError)}
+              aria-describedby={githubFieldError ? 'github-error' : undefined}
+              style={s.inputWithError(Boolean(githubFieldError), s.input)}
+              onFocus={(e) => {
+                if (!githubFieldError) e.target.style.borderColor = 'var(--primary)'
+              }}
+              onBlur={(e) => {
+                if (!githubFieldError) e.target.style.borderColor = 'var(--border)'
+              }}
             />
+            {githubFieldError && (
+              <p id="github-error" style={s.fieldError} role="alert">
+                {githubFieldError}
+              </p>
+            )}
           </div>
 
           <div style={{ marginBottom: 20 }}>
@@ -460,13 +494,27 @@ export default function AddProject() {
               id="slack"
               type="text"
               value={slackWebhook}
-              onChange={(e) => setSlackWebhook(e.target.value)}
+              onChange={(e) => {
+                setSlackWebhook(e.target.value)
+                setSlackFieldError(null)
+              }}
               placeholder="https://hooks.slack.com/services/..."
               required
-              style={s.input}
-              onFocus={(e) => (e.target.style.borderColor = 'var(--primary)')}
-              onBlur={(e) => (e.target.style.borderColor = 'var(--border)')}
+              aria-invalid={Boolean(slackFieldError)}
+              aria-describedby={slackFieldError ? 'slack-error' : undefined}
+              style={s.inputWithError(Boolean(slackFieldError), s.input)}
+              onFocus={(e) => {
+                if (!slackFieldError) e.target.style.borderColor = 'var(--primary)'
+              }}
+              onBlur={(e) => {
+                if (!slackFieldError) e.target.style.borderColor = 'var(--border)'
+              }}
             />
+            {slackFieldError && (
+              <p id="slack-error" style={s.fieldError} role="alert">
+                {slackFieldError}
+              </p>
+            )}
             <p
               style={{
                 marginTop: 8,

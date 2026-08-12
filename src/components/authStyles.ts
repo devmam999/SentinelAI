@@ -65,3 +65,17 @@ export const authLink: CSSProperties = {
   fontWeight: 600,
   textDecoration: 'none',
 }
+
+export const fieldError: CSSProperties = {
+  marginTop: 6,
+  fontFamily: 'var(--font-inter)',
+  fontSize: '0.78rem',
+  lineHeight: 1.45,
+  color: '#ff8a8a',
+}
+
+export function inputWithError(hasError: boolean, base: CSSProperties = input): CSSProperties {
+  return hasError
+    ? { ...base, borderColor: 'rgba(255, 95, 95, 0.55)', boxShadow: '0 0 0 1px rgba(255, 95, 95, 0.15)' }
+    : base
+}
