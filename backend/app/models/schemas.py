@@ -115,3 +115,59 @@ class IncidentResponse(BaseModel):
     )
     scanned_commits: int
     runbook_matches: list[RunbookMatch] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Postmortem (posted to Slack when an incident is resolved)
+# --------------------------------------------------------------------------- #
+class PostmortemTimelineEvent(BaseModel):
+    timestamp: str = Field(..., description="ISO-8601 timestamp for ordering/display.")
+    label: str
+
+
+class PostmortemFixRejection(BaseModel):
+    rejected_by: str
+    rejected_at: str
+    reason: str
+
+
+class PostmortemResolution(BaseModel):
+    engineer: str
+    submitted_at: str
+    description: str
+
+
+class PostmortemVerification(BaseModel):
+    rejections: list[PostmortemFixRejection] = Field(default_factory=list)
+    verified_by: str | None = None
+    verified_at: str | None = None
+
+
+class PostmortemClosure(BaseModel):
+    closed_by: str
+    closed_at: str
+
+
+class PostmortemRequest(BaseModel):
+    slack_webhook_url: str
+    incident_number: int
+    title: str
+    started_at: str
+    resolved_at: str
+    reported_by: str
+    assigned_to: str | None = None
+    impact: str
+    root_cause: str
+    root_cause_evidence: list[str] = Field(default_factory=list)
+    runbook_sections: list[str] = Field(default_factory=list)
+    github_evidence: list[str] = Field(default_factory=list)
+    recommended_remediation: list[str] = Field(default_factory=list)
+    resolution: PostmortemResolution
+    verification: PostmortemVerification
+    closure: PostmortemClosure
+    timeline: list[PostmortemTimelineEvent] = Field(default_factory=list)
+
+
+class PostmortemResponse(BaseModel):
+    slack_posted: bool
+    slack_error: str | None = None

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
-import { analyzeIncident, indexRunbookFile } from '../lib/api'
+import { analyzeIncident, indexRunbookFile, postIncidentPostmortem } from '../lib/api'
+import { buildPostmortemPayload } from '../lib/postmortem'
 import { useAuth } from '../context/AuthContext'
 import ProjectTeamModal from '../components/ProjectTeamModal'
 import LeaveProjectModal from '../components/LeaveProjectModal'
@@ -27,6 +28,7 @@ import {
   getMyProjectRole,
   requestIncidentAssignment,
   reviewIncidentAssignment,
+  markPostmortemPosted,
   reviewIncidentFix,
   roleLabel,
   submitIncidentFix,
@@ -86,6 +88,7 @@ export default function ProjectDetail() {
   const [analyzing, setAnalyzing] = useState(false)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
   const [analyzeWarning, setAnalyzeWarning] = useState<string | null>(null)
+  const [postmortemWarning, setPostmortemWarning] = useState<string | null>(null)
   const [resolveTarget, setResolveTarget] = useState<IncidentWithFix | null>(null)
   const [reviewFixTarget, setReviewFixTarget] = useState<IncidentFix | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
@@ -159,6 +162,49 @@ export default function ProjectDetail() {
       }),
     )
   }, [id, user])
+
+  const postPostmortemForIncident = useCallback(
+    async (incidentId: string) => {
+      if (!project?.slack_webhook || !id) return
+
+      setPostmortemWarning(null)
+
+      const [nextIncidents, fixes] = await Promise.all([
+        fetchProjectIncidents(id),
+        fetchIncidentFixes(id),
+      ])
+      const incident = nextIncidents.find((row) => row.id === incidentId)
+      if (!incident || incident.postmortem_posted || incident.status !== 'resolved') {
+        return
+      }
+
+      const closerUsername = profile?.username ?? user?.email?.split('@')[0] ?? 'Owner/Admin'
+      const payload = buildPostmortemPayload({
+        incident,
+        fixes,
+        reporterUsername: incident.reporter_username ?? null,
+        closerUsername,
+        slackWebhookUrl: project.slack_webhook,
+      })
+      if (!payload) return
+
+      try {
+        const result = await postIncidentPostmortem(payload)
+        if (result.slack_posted) {
+          await markPostmortemPosted(incidentId)
+        } else if (result.slack_error) {
+          setPostmortemWarning(`Incident resolved, but postmortem failed to post: ${result.slack_error}`)
+        }
+      } catch (err) {
+        setPostmortemWarning(
+          err instanceof Error
+            ? `Incident resolved, but postmortem failed to post: ${err.message}`
+            : 'Incident resolved, but postmortem failed to post.',
+        )
+      }
+    },
+    [id, profile?.username, project?.slack_webhook, user?.email],
+  )
 
   useEffect(() => {
     if (!id) return
@@ -258,6 +304,7 @@ export default function ProjectDetail() {
         title: analysis.likely_cause || analysis.most_relevant_commit || 'Production incident',
         alertDescription,
         analysis,
+        runbookMatches: result.runbook_matches,
         slackPosted: result.slack_posted,
         createdBy: user.id,
       })
@@ -279,15 +326,22 @@ export default function ProjectDetail() {
 
   const handleSubmitFix = async (fixDescription: string) => {
     if (!resolveTarget) return
-    const { error: submitError } = await submitIncidentFix(resolveTarget.id, fixDescription)
+    const incidentId = resolveTarget.id
+    const autoResolved = canAutoResolve
+    const { error: submitError } = await submitIncidentFix(incidentId, fixDescription)
     if (submitError) throw new Error(submitError)
     setResolveTarget(null)
     await reloadIncidents()
+    if (autoResolved) {
+      await postPostmortemForIncident(incidentId)
+      await reloadIncidents()
+    }
   }
 
   const handleReviewFix = async (fixId: string, approve: boolean, reviewNote?: string) => {
     setReviewError(null)
     setReviewingFixId(fixId)
+    const incidentId = incidents.find((incident) => incident.pendingFix?.id === fixId)?.id
     const { error: reviewErr } = await reviewIncidentFix(fixId, approve, reviewNote)
     setReviewingFixId(null)
     if (reviewErr) {
@@ -295,6 +349,10 @@ export default function ProjectDetail() {
       throw new Error(reviewErr)
     }
     await reloadIncidents()
+    if (approve && incidentId) {
+      await postPostmortemForIncident(incidentId)
+      await reloadIncidents()
+    }
   }
 
   const handleSubmitFixFeedback = async (feedback: string) => {
@@ -754,6 +812,7 @@ export default function ProjectDetail() {
                 </p>
                 {analyzeError && <div style={{ ...errorStyle, marginBottom: 12 }}>{analyzeError}</div>}
                 {analyzeWarning && <div style={{ ...warningStyle, marginBottom: 12 }}>{analyzeWarning}</div>}
+                {postmortemWarning && <div style={{ ...warningStyle, marginBottom: 12 }}>{postmortemWarning}</div>}
 
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginBottom: 28 }}>
                   <input

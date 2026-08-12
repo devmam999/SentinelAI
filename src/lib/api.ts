@@ -228,6 +228,61 @@ export async function analyzeIncident(input: AnalyzeInput): Promise<IncidentResp
   return res.json()
 }
 
+export type PostmortemPayload = {
+  slack_webhook_url: string
+  incident_number: number
+  title: string
+  started_at: string
+  resolved_at: string
+  reported_by: string
+  assigned_to: string | null
+  impact: string
+  root_cause: string
+  root_cause_evidence: string[]
+  runbook_sections: string[]
+  github_evidence: string[]
+  recommended_remediation: string[]
+  resolution: {
+    engineer: string
+    submitted_at: string
+    description: string
+  }
+  verification: {
+    rejections: Array<{
+      rejected_by: string
+      rejected_at: string
+      reason: string
+    }>
+    verified_by: string | null
+    verified_at: string | null
+  }
+  closure: {
+    closed_by: string
+    closed_at: string
+  }
+  timeline: Array<{
+    timestamp: string
+    label: string
+  }>
+}
+
+export type PostmortemResponse = {
+  slack_posted: boolean
+  slack_error?: string | null
+}
+
+/** Post a structured postmortem to Slack after an incident is resolved. */
+export async function postIncidentPostmortem(payload: PostmortemPayload): Promise<PostmortemResponse> {
+  const url = `${requireApiUrl()}/api/incidents/postmortem`
+  const res = await fetchBackend(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw await readApiError(res, url)
+  return res.json()
+}
+
 /** Confirm a GitHub repository exists and is readable by the backend. */
 export async function validateGithubRepo(repo: string): Promise<GithubValidateResult> {
   const params = new URLSearchParams({ repo: repo.trim() })

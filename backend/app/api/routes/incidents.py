@@ -3,8 +3,15 @@
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
-from ...models.schemas import IncidentAnalysis, IncidentRequest, IncidentResponse
+from ...models.schemas import (
+    IncidentAnalysis,
+    IncidentRequest,
+    IncidentResponse,
+    PostmortemRequest,
+    PostmortemResponse,
+)
 from ...services import incident_service, slack_service
+from ...services.postmortem_service import build_postmortem_payload
 from ...services.slack_service import format_webhook_error
 from ...services.gemini_errors import format_rate_limit_message, is_rate_limit_error
 
@@ -62,3 +69,25 @@ async def notify(
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Slack error: {exc}") from exc
     return {"status": "sent"}
+
+
+@router.post("/postmortem", response_model=PostmortemResponse)
+async def post_postmortem(request: PostmortemRequest) -> PostmortemResponse:
+    """Post a structured postmortem to Slack when an incident is resolved."""
+
+    payload = build_postmortem_payload(request)
+    try:
+        await slack_service.post_postmortem(request.slack_webhook_url, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        return PostmortemResponse(
+            slack_posted=False,
+            slack_error=format_webhook_error(exc.response),
+        )
+    except httpx.HTTPError as exc:
+        return PostmortemResponse(
+            slack_posted=False,
+            slack_error=f"Slack webhook failed: {exc}",
+        )
+    return PostmortemResponse(slack_posted=True)

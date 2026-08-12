@@ -274,6 +274,7 @@ database**, and **runbook file storage**.
    | **9** | **Security hardening** — stricter RLS on `projects` / `project_members`, `can_access_project`, and **`SECURITY DEFINER`** RPCs so invited users can list and open shared projects (see [Row Level Security](#row-level-security-rls) below) |
    | **10** | **Incident assignment workflow** — `assigned_to` on incidents, `incident_assignment_requests`, admin-only incident creation, assign / request / review RPCs (see [Incidents & fixes](#incidents--fixes)) |
    | **11** | **Fix review feedback** — `review_incident_fix` requires feedback when declining / requesting changes |
+   | **12** | **Postmortem metadata** — `runbook_matches`, `postmortem_posted`, `assigned_at`, `mark_postmortem_posted` RPC |
    | RPCs | Auth: `resolve_login_email`, `is_username_available`, `update_username`, `delete_own_account` |
    | | Teams: `invite_project_member`, `accept_project_invitation`, `get_my_pending_invitations`, `transfer_project_ownership`, `leave_project`, … |
    | | Access: **`get_my_projects()`**, **`get_accessible_project(uuid)`**, `get_my_project_role(uuid)` |
@@ -434,8 +435,25 @@ flowchart TB
     FIX_REVIEW -->|Decline / Request changes| FEEDBACK[Feedback shown on incident]
     FEEDBACK --> USER_FIX
     ADMIN_FIX --> RESOLVED
+    RESOLVED --> POSTMORTEM[Postmortem posted to Slack]
   end
 ```
+
+**Postmortem on resolve**
+
+When an incident is marked **resolved** (admin auto-fix or approved user fix), SentinelAI automatically posts a structured **postmortem** to the project’s Slack webhook. The report includes:
+
+1. **Incident overview** — ID, title, duration, reporter, assignee  
+2. **Impact** — alert description and affected services  
+3. **Root cause** — Gemini analysis plus commit evidence  
+4. **Detection & investigation** — runbook sections and GitHub commits consulted  
+5. **Recommended remediation** — Gemini next steps  
+6. **Resolution** — approved fix description from the engineer  
+7. **Verification** — all fix rejections with feedback, plus final approval  
+8. **Closure** — who closed the incident and when  
+9. **Timeline** — creation → analysis → assignment → fix submissions/rejections/approval  
+
+Postmortem posting is **best-effort** (like the initial Slack alert): if the webhook fails, the incident stays resolved and the UI shows a warning. A `postmortem_posted` flag prevents duplicate posts on reload.
 
 ```mermaid
 sequenceDiagram
@@ -667,6 +685,7 @@ to apply the deferred-profile triggers and remove any old unconfirmed profile ro
 | POST | `/api/runbooks` | Index runbook JSON body |
 | GET | `/api/runbooks/search` | Semantic search (`?q=...`) |
 | POST | `/api/incidents/analyze` | Full pipeline → analysis; Slack post is **best-effort** (`slack_posted`, optional `slack_error`) |
+| POST | `/api/incidents/postmortem` | Post structured postmortem to Slack when an incident is resolved |
 | POST | `/api/incidents/notify` | Post a pre-built analysis to Slack |
 
 Interactive docs: <http://localhost:8000/docs>
@@ -722,7 +741,8 @@ curl -X POST http://localhost:8000/api/incidents/analyze \
    projects appear after section **9** RLS is applied in Supabase).
 5. Open the project. **Owners/admins:** describe an alert under **Report incident** and click **Analyze Incident**. **Users:** view active incidents, request assignment, and submit fixes once assigned.
 6. Owners/admins **assign** incidents or **approve assignment requests**; assigned users **Submit fix** with a description. Owners/admins **Accept** or **Decline / Request changes** with feedback the assignee can see and act on.
-7. Use **Settings** to update username, email, or password, or delete your
+7. When a fix is **accepted** (or an admin resolves directly), SentinelAI posts a full **postmortem** to Slack automatically.
+8. Use **Settings** to update username, email, or password, or delete your
    account (`sudo delete [username]`). Owners delete projects from the dashboard
    (`sudo delete [Project Name]`). Non-owners can **Leave project** from the
    project header (`sudo deluser [username] [Project Name]`).

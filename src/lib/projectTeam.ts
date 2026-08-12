@@ -1,4 +1,5 @@
 import type { IncidentAnalysis } from './api'
+import type { RunbookMatch } from './api'
 import { supabase } from './supabase'
 
 export type ProjectRole = 'owner' | 'admin' | 'member'
@@ -40,10 +41,15 @@ export type StoredIncident = {
   status: 'active' | 'resolved'
   alert_description: string | null
   analysis: IncidentAnalysis | null
+  runbook_matches: RunbookMatch[] | null
   slack_posted: boolean
+  postmortem_posted: boolean
+  created_by: string | null
+  reporter_username?: string | null
   created_at: string
   resolved_at: string | null
   assigned_to: string | null
+  assigned_at: string | null
   assignee_username?: string | null
 }
 
@@ -71,6 +77,7 @@ export type IncidentFix = {
   review_note: string | null
   created_at: string
   submitter_username?: string | null
+  reviewer_username?: string | null
   incident_number?: number
   incident_title?: string
 }
@@ -593,20 +600,29 @@ export async function fetchProjectIncidents(projectId: string): Promise<StoredIn
 
   if (error || !data) return []
 
-  const assigneeIds = [...new Set(data.map((row) => row.assigned_to).filter(Boolean))] as string[]
-  const assigneeNames = new Map<string, string | null>()
+  const profileIds = [
+    ...new Set(
+      data.flatMap((row) => [row.assigned_to, row.created_by].filter(Boolean)),
+    ),
+  ] as string[]
+  const profileNames = new Map<string, string | null>()
 
   await Promise.all(
-    assigneeIds.map(async (userId) => {
+    profileIds.map(async (userId) => {
       const { data: profile } = await supabase.from('profiles').select('username').eq('id', userId).maybeSingle()
-      assigneeNames.set(userId, profile?.username ?? null)
+      profileNames.set(userId, profile?.username ?? null)
     }),
   )
 
   return data.map((row) => ({
     ...row,
     assigned_to: row.assigned_to ?? null,
-    assignee_username: row.assigned_to ? assigneeNames.get(row.assigned_to) ?? null : null,
+    assigned_at: row.assigned_at ?? null,
+    created_by: row.created_by ?? null,
+    assignee_username: row.assigned_to ? profileNames.get(row.assigned_to) ?? null : null,
+    reporter_username: row.created_by ? profileNames.get(row.created_by) ?? null : null,
+    runbook_matches: (row.runbook_matches as RunbookMatch[] | null) ?? null,
+    postmortem_posted: Boolean(row.postmortem_posted),
     analysis: (row.analysis as IncidentAnalysis | null) ?? null,
     status: row.status as StoredIncident['status'],
   }))
@@ -617,6 +633,7 @@ export async function createProjectIncident(input: {
   title: string
   alertDescription: string
   analysis: IncidentAnalysis
+  runbookMatches?: RunbookMatch[]
   slackPosted: boolean
   createdBy: string
 }): Promise<{ incident: StoredIncident | null; error: string | null }> {
@@ -627,6 +644,7 @@ export async function createProjectIncident(input: {
       title: input.title,
       alert_description: input.alertDescription,
       analysis: input.analysis,
+      runbook_matches: input.runbookMatches ?? null,
       slack_posted: input.slackPosted,
       created_by: input.createdBy,
       status: 'active',
@@ -639,6 +657,10 @@ export async function createProjectIncident(input: {
   return {
     incident: {
       ...data,
+      runbook_matches: (data.runbook_matches as RunbookMatch[] | null) ?? null,
+      postmortem_posted: Boolean(data.postmortem_posted),
+      assigned_at: data.assigned_at ?? null,
+      created_by: data.created_by ?? null,
       analysis: (data.analysis as IncidentAnalysis | null) ?? null,
       status: data.status as StoredIncident['status'],
     },
@@ -665,24 +687,38 @@ export async function fetchIncidentFixes(projectId: string): Promise<IncidentFix
 
   if (error || !fixes) return []
 
-  return Promise.all(
-    fixes.map(async (fix) => {
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('username')
-        .eq('id', fix.submitted_by)
-        .maybeSingle()
+  const profileIds = [
+    ...new Set(
+      fixes.flatMap((fix) => [fix.submitted_by, fix.reviewed_by].filter(Boolean)),
+    ),
+  ] as string[]
+  const profileNames = new Map<string, string | null>()
 
-      const incident = incidentMap.get(fix.incident_id)
-      return {
-        ...fix,
-        status: fix.status as IncidentFix['status'],
-        submitter_username: profile?.username ?? null,
-        incident_number: incident?.incident_number,
-        incident_title: incident?.title,
-      }
+  await Promise.all(
+    profileIds.map(async (userId) => {
+      const { data: profile } = await supabase.from('profiles').select('username').eq('id', userId).maybeSingle()
+      profileNames.set(userId, profile?.username ?? null)
     }),
   )
+
+  return fixes.map((fix) => {
+    const incident = incidentMap.get(fix.incident_id)
+    return {
+      ...fix,
+      status: fix.status as IncidentFix['status'],
+      submitter_username: profileNames.get(fix.submitted_by) ?? null,
+      reviewer_username: fix.reviewed_by ? profileNames.get(fix.reviewed_by) ?? null : null,
+      incident_number: incident?.incident_number,
+      incident_title: incident?.title,
+    }
+  })
+}
+
+export async function markPostmortemPosted(incidentId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase.rpc('mark_postmortem_posted', {
+    p_incident_id: incidentId,
+  })
+  return { error: error?.message ?? null }
 }
 
 export async function submitIncidentFix(

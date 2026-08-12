@@ -2258,3 +2258,167 @@ begin
   end if;
 end;
 $$;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 12. Postmortem metadata + assignment timestamps
+-- ─────────────────────────────────────────────────────────────────────────────
+
+alter table public.incidents
+  add column if not exists runbook_matches jsonb,
+  add column if not exists postmortem_posted boolean not null default false,
+  add column if not exists assigned_at timestamptz;
+
+create or replace function public.assign_incident(
+  p_incident_id uuid,
+  p_assignee_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  inc record;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select * into inc
+  from public.incidents
+  where id = p_incident_id;
+
+  if inc.id is null then
+    raise exception 'Incident not found';
+  end if;
+
+  if not public.is_project_admin(inc.project_id) then
+    raise exception 'Only project owners and admins can assign incidents';
+  end if;
+
+  if inc.status <> 'active' then
+    raise exception 'This incident is already resolved';
+  end if;
+
+  if not public.is_project_member(inc.project_id, p_assignee_id) then
+    raise exception 'Assignee must be a project member';
+  end if;
+
+  update public.incidents
+  set assigned_to = p_assignee_id,
+      assigned_at = now()
+  where id = inc.id;
+
+  update public.incident_assignment_requests
+  set status = 'declined',
+      reviewed_by = auth.uid(),
+      reviewed_at = now()
+  where incident_id = inc.id
+    and status = 'pending'
+    and requested_by <> p_assignee_id;
+end;
+$$;
+
+create or replace function public.review_incident_assignment(
+  p_request_id uuid,
+  p_approve boolean
+)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  req record;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select r.*, i.project_id, i.status as incident_status, i.assigned_to
+  into req
+  from public.incident_assignment_requests r
+  join public.incidents i on i.id = r.incident_id
+  where r.id = p_request_id;
+
+  if req.id is null then
+    raise exception 'Assignment request not found';
+  end if;
+
+  if not public.is_project_admin(req.project_id) then
+    raise exception 'Only project owners and admins can review assignment requests';
+  end if;
+
+  if req.status <> 'pending' then
+    raise exception 'This assignment request has already been reviewed';
+  end if;
+
+  if req.incident_status <> 'active' then
+    raise exception 'This incident is already resolved';
+  end if;
+
+  if p_approve then
+    update public.incidents
+    set assigned_to = req.requested_by,
+        assigned_at = now()
+    where id = req.incident_id;
+
+    update public.incident_assignment_requests
+    set status = 'approved',
+        reviewed_by = auth.uid(),
+        reviewed_at = now()
+    where id = req.id;
+
+    update public.incident_assignment_requests
+    set status = 'declined',
+        reviewed_by = auth.uid(),
+        reviewed_at = now()
+    where incident_id = req.incident_id
+      and status = 'pending'
+      and id <> req.id;
+  else
+    update public.incident_assignment_requests
+    set status = 'declined',
+        reviewed_by = auth.uid(),
+        reviewed_at = now()
+    where id = req.id;
+  end if;
+end;
+$$;
+
+create or replace function public.mark_postmortem_posted(p_incident_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  inc record;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select * into inc
+  from public.incidents
+  where id = p_incident_id;
+
+  if inc.id is null then
+    raise exception 'Incident not found';
+  end if;
+
+  if not public.can_access_project(inc.project_id) then
+    raise exception 'Not allowed';
+  end if;
+
+  if inc.status <> 'resolved' then
+    raise exception 'Postmortem can only be posted for resolved incidents';
+  end if;
+
+  update public.incidents
+  set postmortem_posted = true
+  where id = inc.id;
+end;
+$$;
+
+grant execute on function public.mark_postmortem_posted(uuid) to authenticated;

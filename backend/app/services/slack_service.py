@@ -145,3 +145,12 @@ async def post_incident(webhook_url: str, analysis: IncidentAnalysis) -> None:
         resp = await client.post(url, json=payload)
         # Slack returns 200 with body "ok" on success.
         resp.raise_for_status()
+
+
+async def post_postmortem(webhook_url: str, payload: dict) -> None:
+    """POST a formatted postmortem message to a Slack Incoming Webhook."""
+
+    url = normalize_webhook_url(webhook_url)
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, json=payload)
+        resp.raise_for_status()
