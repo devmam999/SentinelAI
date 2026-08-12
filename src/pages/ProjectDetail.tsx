@@ -7,11 +7,17 @@ import ProjectTeamModal from '../components/ProjectTeamModal'
 import LeaveProjectModal from '../components/LeaveProjectModal'
 import ProjectEditRequestsSection from '../components/ProjectEditRequestsSection'
 import ResolveIncidentModal from '../components/ResolveIncidentModal'
+import ReviewFixModal from '../components/ReviewFixModal'
+import AssigneeCombobox from '../components/AssigneeCombobox'
 import {
+  assignIncident,
   canAutoResolveIncidents,
+  canCreateIncidents,
   canManageTeam,
   canReviewFixes,
+  canSubmitIncidentFix,
   createProjectIncident,
+  fetchIncidentAssignmentRequests,
   fetchIncidentFixes,
   fetchPendingEditRequests,
   fetchProjectIncidents,
@@ -19,9 +25,12 @@ import {
   fetchAccessibleProject,
   fetchProjectTeam,
   getMyProjectRole,
+  requestIncidentAssignment,
+  reviewIncidentAssignment,
   reviewIncidentFix,
   roleLabel,
   submitIncidentFix,
+  type IncidentAssignmentRequest,
   type IncidentFix,
   type ProjectEditRequest,
   type ProjectInvitation,
@@ -33,6 +42,7 @@ import {
 type Project = {
   id: string
   name: string
+  user_id: string
   github_repo: string | null
   slack_webhook: string | null
   runbooks: string | null
@@ -42,6 +52,8 @@ type Project = {
 type IncidentWithFix = StoredIncident & {
   pendingFix?: IncidentFix | null
   latestFix?: IncidentFix | null
+  latestDeclinedFix?: IncidentFix | null
+  myPendingAssignment?: IncidentAssignmentRequest | null
 }
 
 function parseRunbooks(runbooks: string | null): string[] {
@@ -75,8 +87,14 @@ export default function ProjectDetail() {
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
   const [analyzeWarning, setAnalyzeWarning] = useState<string | null>(null)
   const [resolveTarget, setResolveTarget] = useState<IncidentWithFix | null>(null)
+  const [reviewFixTarget, setReviewFixTarget] = useState<IncidentFix | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
   const [reviewingFixId, setReviewingFixId] = useState<string | null>(null)
+  const [assignmentError, setAssignmentError] = useState<string | null>(null)
+  const [reviewingAssignmentId, setReviewingAssignmentId] = useState<string | null>(null)
+  const [assigningIncidentId, setAssigningIncidentId] = useState<string | null>(null)
+  const [requestingAssignmentId, setRequestingAssignmentId] = useState<string | null>(null)
+  const [pendingAssignmentRequests, setPendingAssignmentRequests] = useState<IncidentAssignmentRequest[]>([])
   const [teamModalOpen, setTeamModalOpen] = useState(false)
   const [leaveModalOpen, setLeaveModalOpen] = useState(false)
 
@@ -84,6 +102,7 @@ export default function ProjectDetail() {
   const canReview = canReviewFixes(myRole)
   const canManage = canManageTeam(myRole)
   const canAutoResolve = canAutoResolveIncidents(myRole)
+  const canReportIncidents = canCreateIncidents(myRole)
 
   const reloadTeam = useCallback(async () => {
     if (!id) return
@@ -102,8 +121,12 @@ export default function ProjectDetail() {
   }, [id])
 
   const reloadIncidents = useCallback(async () => {
-    if (!id) return
-    const [nextIncidents, fixes] = await Promise.all([fetchProjectIncidents(id), fetchIncidentFixes(id)])
+    if (!id || !user) return
+    const [nextIncidents, fixes, assignmentRequests] = await Promise.all([
+      fetchProjectIncidents(id),
+      fetchIncidentFixes(id),
+      fetchIncidentAssignmentRequests(id),
+    ])
     const fixesByIncident = new Map<string, IncidentFix[]>()
     for (const fix of fixes) {
       const list = fixesByIncident.get(fix.incident_id) ?? []
@@ -111,15 +134,31 @@ export default function ProjectDetail() {
       fixesByIncident.set(fix.incident_id, list)
     }
 
+    const myPendingByIncident = new Map<string, IncidentAssignmentRequest>()
+    for (const request of assignmentRequests) {
+      if (request.status === 'pending' && request.requested_by === user.id) {
+        myPendingByIncident.set(request.incident_id, request)
+      }
+    }
+
+    setPendingAssignmentRequests(assignmentRequests.filter((r) => r.status === 'pending'))
     setIncidents(
       nextIncidents.map((incident) => {
         const incidentFixes = fixesByIncident.get(incident.id) ?? []
         const pendingFix = incidentFixes.find((fix) => fix.status === 'pending') ?? null
         const latestFix = incidentFixes[0] ?? null
-        return { ...incident, pendingFix, latestFix }
+        const latestDeclinedFix =
+          incidentFixes.find((fix) => fix.status === 'declined' && fix.review_note) ?? null
+        return {
+          ...incident,
+          pendingFix,
+          latestFix,
+          latestDeclinedFix,
+          myPendingAssignment: myPendingByIncident.get(incident.id) ?? null,
+        }
       }),
     )
-  }, [id])
+  }, [id, user])
 
   useEffect(() => {
     if (!id) return
@@ -193,6 +232,10 @@ export default function ProjectDetail() {
 
   const triggerAnalysis = async () => {
     if (!project || !user) return
+    if (!canReportIncidents) {
+      setAnalyzeError('Only project owners and admins can report and analyze incidents.')
+      return
+    }
     if (!project.github_repo) {
       setAnalyzeError('Add a GitHub repository to this project before analyzing.')
       return
@@ -242,13 +285,55 @@ export default function ProjectDetail() {
     await reloadIncidents()
   }
 
-  const handleReviewFix = async (fixId: string, approve: boolean) => {
+  const handleReviewFix = async (fixId: string, approve: boolean, reviewNote?: string) => {
     setReviewError(null)
     setReviewingFixId(fixId)
-    const { error: reviewErr } = await reviewIncidentFix(fixId, approve)
+    const { error: reviewErr } = await reviewIncidentFix(fixId, approve, reviewNote)
     setReviewingFixId(null)
     if (reviewErr) {
       setReviewError(reviewErr)
+      throw new Error(reviewErr)
+    }
+    await reloadIncidents()
+  }
+
+  const handleSubmitFixFeedback = async (feedback: string) => {
+    if (!reviewFixTarget) return
+    await handleReviewFix(reviewFixTarget.id, false, feedback)
+    setReviewFixTarget(null)
+  }
+
+  const handleAssignIncident = async (incidentId: string, assigneeUserId: string) => {
+    setAssignmentError(null)
+    setAssigningIncidentId(incidentId)
+    const { error: assignErr } = await assignIncident(incidentId, assigneeUserId)
+    setAssigningIncidentId(null)
+    if (assignErr) {
+      setAssignmentError(assignErr)
+      return
+    }
+    await reloadIncidents()
+  }
+
+  const handleRequestAssignment = async (incidentId: string) => {
+    setAssignmentError(null)
+    setRequestingAssignmentId(incidentId)
+    const { error: requestErr } = await requestIncidentAssignment(incidentId)
+    setRequestingAssignmentId(null)
+    if (requestErr) {
+      setAssignmentError(requestErr)
+      return
+    }
+    await reloadIncidents()
+  }
+
+  const handleReviewAssignment = async (requestId: string, approve: boolean) => {
+    setAssignmentError(null)
+    setReviewingAssignmentId(requestId)
+    const { error: reviewErr } = await reviewIncidentAssignment(requestId, approve)
+    setReviewingAssignmentId(null)
+    if (reviewErr) {
+      setAssignmentError(reviewErr)
       return
     }
     await reloadIncidents()
@@ -467,6 +552,65 @@ export default function ProjectDetail() {
               <ProjectEditRequestsSection requests={editRequests} onReviewed={reloadTeam} />
             )}
 
+            {canReview && pendingAssignmentRequests.length > 0 && (
+              <>
+                <SectionHeading>Pending assignment requests</SectionHeading>
+                {assignmentError && <div style={{ ...errorStyle, marginBottom: 12 }}>{assignmentError}</div>}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 28 }}>
+                  {pendingAssignmentRequests.map((request) => (
+                    <div
+                      key={request.id}
+                      style={{
+                        background: 'var(--card)',
+                        border: '1px solid rgba(0,214,143,0.22)',
+                        borderRadius: 10,
+                        padding: '16px 18px',
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontFamily: 'var(--font-inter)',
+                          fontSize: '0.92rem',
+                          fontWeight: 700,
+                          marginBottom: 6,
+                        }}
+                      >
+                        #{request.incident_number} {request.incident_title}
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: 'var(--font-jetbrains)',
+                          fontSize: '0.72rem',
+                          color: 'var(--muted-foreground)',
+                          marginBottom: 14,
+                        }}
+                      >
+                        {request.requester_username || 'Teammate'} requested to be assigned
+                      </div>
+                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          onClick={() => handleReviewAssignment(request.id, true)}
+                          disabled={reviewingAssignmentId === request.id}
+                          style={{ ...simulateButtonStyle, opacity: reviewingAssignmentId === request.id ? 0.6 : 1 }}
+                        >
+                          Approve assignment
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleReviewAssignment(request.id, false)}
+                          disabled={reviewingAssignmentId === request.id}
+                          style={{ ...resolveButtonStyle, opacity: reviewingAssignmentId === request.id ? 0.6 : 1 }}
+                        >
+                          Decline
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
             {canReview && pendingFixes.length > 0 && (
               <>
                 <SectionHeading>Pending fix reviews</SectionHeading>
@@ -502,6 +646,19 @@ export default function ProjectDetail() {
                       >
                         Submitted by {fix.submitter_username || 'teammate'}
                       </div>
+                      <div
+                        style={{
+                          fontFamily: 'var(--font-jetbrains)',
+                          fontSize: '0.68rem',
+                          fontWeight: 600,
+                          letterSpacing: '0.08em',
+                          textTransform: 'uppercase',
+                          color: 'var(--muted-foreground)',
+                          marginBottom: 8,
+                        }}
+                      >
+                        What they fixed
+                      </div>
                       <p
                         style={{
                           fontFamily: 'var(--font-inter)',
@@ -516,7 +673,7 @@ export default function ProjectDetail() {
                       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                         <button
                           type="button"
-                          onClick={() => handleReviewFix(fix.id, true)}
+                          onClick={() => void handleReviewFix(fix.id, true)}
                           disabled={reviewingFixId === fix.id}
                           style={{ ...simulateButtonStyle, opacity: reviewingFixId === fix.id ? 0.6 : 1 }}
                         >
@@ -524,11 +681,11 @@ export default function ProjectDetail() {
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleReviewFix(fix.id, false)}
+                          onClick={() => setReviewFixTarget(fix)}
                           disabled={reviewingFixId === fix.id}
                           style={{ ...resolveButtonStyle, opacity: reviewingFixId === fix.id ? 0.6 : 1 }}
                         >
-                          Decline
+                          Decline / Request changes
                         </button>
                       </div>
                     </div>
@@ -538,9 +695,28 @@ export default function ProjectDetail() {
             )}
 
             <SectionHeading>Current Incidents</SectionHeading>
+            {!canReportIncidents && (
+              <p
+                style={{
+                  fontFamily: 'var(--font-inter)',
+                  fontSize: '0.84rem',
+                  lineHeight: 1.5,
+                  color: 'var(--muted-foreground)',
+                  marginBottom: 14,
+                }}
+              >
+                Active incidents reported by owners and admins appear here. Request assignment to help resolve
+                an issue, or wait to be assigned by your team lead.
+              </p>
+            )}
+            {assignmentError && !canReview && <div style={{ ...errorStyle, marginBottom: 12 }}>{assignmentError}</div>}
             <div style={{ marginBottom: 16 }}>
               {activeIncidents.length === 0 ? (
-                <div style={emptyRowStyle}>No active incidents.</div>
+                <div style={emptyRowStyle}>
+                  {canReportIncidents
+                    ? 'No active incidents. Describe an alert below to analyze and open one.'
+                    : 'No active incidents right now.'}
+                </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                   {activeIncidents.map((incident) => (
@@ -548,57 +724,80 @@ export default function ProjectDetail() {
                       key={incident.id}
                       incident={incident}
                       isAdmin={canAutoResolve}
+                      currentUserId={user?.id ?? null}
+                      team={team}
+                      canSubmitFix={canSubmitIncidentFix(myRole, incident.assigned_to, user?.id)}
+                      assigning={assigningIncidentId === incident.id}
+                      requestingAssignment={requestingAssignmentId === incident.id}
                       onResolve={() => setResolveTarget(incident)}
+                      onAssign={(assigneeUserId) => handleAssignIncident(incident.id, assigneeUserId)}
+                      onRequestAssignment={() => handleRequestAssignment(incident.id)}
                     />
                   ))}
                 </div>
               )}
             </div>
 
-            {analyzeError && <div style={{ ...errorStyle, marginBottom: 12 }}>{analyzeError}</div>}
-            {analyzeWarning && <div style={{ ...warningStyle, marginBottom: 12 }}>{analyzeWarning}</div>}
+            {canReportIncidents && (
+              <>
+                <SectionHeading style={{ marginTop: 8 }}>Report incident</SectionHeading>
+                <p
+                  style={{
+                    fontFamily: 'var(--font-inter)',
+                    fontSize: '0.84rem',
+                    lineHeight: 1.5,
+                    color: 'var(--muted-foreground)',
+                    marginBottom: 12,
+                  }}
+                >
+                  Describe what you observed. Sentinel will scan commits, search runbooks, and run Gemini analysis.
+                </p>
+                {analyzeError && <div style={{ ...errorStyle, marginBottom: 12 }}>{analyzeError}</div>}
+                {analyzeWarning && <div style={{ ...warningStyle, marginBottom: 12 }}>{analyzeWarning}</div>}
 
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
-              <input
-                type="text"
-                value={alertText}
-                onChange={(e) => setAlertText(e.target.value)}
-                placeholder="Describe the alert (optional) — e.g. 5xx spike on API gateway"
-                disabled={analyzing}
-                style={{
-                  flex: 1,
-                  minWidth: 240,
-                  fontFamily: 'var(--font-inter)',
-                  fontSize: '0.875rem',
-                  color: 'var(--foreground)',
-                  background: 'var(--background)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 5,
-                  padding: '10px 12px',
-                  outline: 'none',
-                }}
-                onFocus={(e) => (e.currentTarget.style.borderColor = 'var(--primary)')}
-                onBlur={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !analyzing) triggerAnalysis()
-                }}
-              />
-              <button
-                onClick={triggerAnalysis}
-                disabled={analyzing}
-                style={{
-                  ...simulateButtonStyle,
-                  opacity: analyzing ? 0.6 : 1,
-                  cursor: analyzing ? 'default' : 'pointer',
-                }}
-                onMouseEnter={(e) => !analyzing && (e.currentTarget.style.opacity = '0.85')}
-                onMouseLeave={(e) => !analyzing && (e.currentTarget.style.opacity = '1')}
-              >
-                {analyzing ? 'Analyzing…' : 'Analyze Incident'}
-              </button>
-            </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginBottom: 28 }}>
+                  <input
+                    type="text"
+                    value={alertText}
+                    onChange={(e) => setAlertText(e.target.value)}
+                    placeholder="Describe the alert — e.g. 5xx spike on API gateway"
+                    disabled={analyzing}
+                    style={{
+                      flex: 1,
+                      minWidth: 240,
+                      fontFamily: 'var(--font-inter)',
+                      fontSize: '0.875rem',
+                      color: 'var(--foreground)',
+                      background: 'var(--background)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 5,
+                      padding: '10px 12px',
+                      outline: 'none',
+                    }}
+                    onFocus={(e) => (e.currentTarget.style.borderColor = 'var(--primary)')}
+                    onBlur={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !analyzing) triggerAnalysis()
+                    }}
+                  />
+                  <button
+                    onClick={triggerAnalysis}
+                    disabled={analyzing}
+                    style={{
+                      ...simulateButtonStyle,
+                      opacity: analyzing ? 0.6 : 1,
+                      cursor: analyzing ? 'default' : 'pointer',
+                    }}
+                    onMouseEnter={(e) => !analyzing && (e.currentTarget.style.opacity = '0.85')}
+                    onMouseLeave={(e) => !analyzing && (e.currentTarget.style.opacity = '1')}
+                  >
+                    {analyzing ? 'Analyzing…' : 'Analyze Incident'}
+                  </button>
+                </div>
+              </>
+            )}
 
-            <SectionHeading style={{ marginTop: 40 }}>Recent Incidents</SectionHeading>
+            <SectionHeading style={{ marginTop: canReportIncidents ? 0 : 8 }}>Recent Incidents</SectionHeading>
             {recentIncidents.length === 0 ? (
               <div style={emptyRowStyle}>No recent incidents.</div>
             ) : (
@@ -736,6 +935,16 @@ export default function ProjectDetail() {
           onSubmit={handleSubmitFix}
         />
       )}
+
+      {reviewFixTarget && (
+        <ReviewFixModal
+          incidentTitle={reviewFixTarget.incident_title ?? 'Incident'}
+          submitterUsername={reviewFixTarget.submitter_username ?? null}
+          fixDescription={reviewFixTarget.fix_description}
+          onClose={() => setReviewFixTarget(null)}
+          onSubmit={handleSubmitFixFeedback}
+        />
+      )}
     </div>
   )
 }
@@ -804,43 +1013,195 @@ function StatCard({ label, value, good }: { label: string; value: string; good: 
 function ActiveIncidentCard({
   incident,
   isAdmin,
+  currentUserId,
+  team,
+  canSubmitFix,
+  assigning,
+  requestingAssignment,
   onResolve,
+  onAssign,
+  onRequestAssignment,
 }: {
   incident: IncidentWithFix
   isAdmin: boolean
+  currentUserId: string | null
+  team: TeamMember[]
+  canSubmitFix: boolean
+  assigning: boolean
+  requestingAssignment: boolean
   onResolve: () => void
+  onAssign: (assigneeUserId: string) => void
+  onRequestAssignment: () => void
 }) {
   const a = incident.analysis
   const hasPendingFix = incident.pendingFix?.status === 'pending'
+  const hasMyPendingAssignment = incident.myPendingAssignment?.status === 'pending'
+  const isAssignedToMe = Boolean(currentUserId && incident.assigned_to === currentUserId)
+  const [selectedAssignee, setSelectedAssignee] = useState('')
+
+  const assigneeLabel = incident.assignee_username
+    ? `@${incident.assignee_username}`
+    : incident.assigned_to
+      ? 'Assigned teammate'
+      : 'Unassigned'
 
   return (
     <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10, padding: '16px 18px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={monoMuted}>#{incident.incident_number}</span>
-          <span style={{ fontFamily: 'var(--font-inter)', fontSize: '0.95rem', fontWeight: 600, color: 'var(--foreground)' }}>
-            {incident.title}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span style={monoMuted}>#{incident.incident_number}</span>
+            <span style={{ fontFamily: 'var(--font-inter)', fontSize: '0.95rem', fontWeight: 600, color: 'var(--foreground)' }}>
+              {incident.title}
+            </span>
           </span>
-        </span>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {incident.alert_description && (
+            <p
+              style={{
+                margin: '8px 0 0',
+                fontFamily: 'var(--font-inter)',
+                fontSize: '0.84rem',
+                lineHeight: 1.5,
+                color: 'var(--muted-foreground)',
+              }}
+            >
+              {incident.alert_description}
+            </p>
+          )}
+          {isAdmin && !hasPendingFix ? (
+            <div
+              style={{
+                marginTop: 8,
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 8,
+                alignItems: 'center',
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: 'var(--font-jetbrains)',
+                  fontSize: '0.72rem',
+                  color: 'var(--muted-foreground)',
+                  flexShrink: 0,
+                }}
+              >
+                Assignee:
+              </span>
+              <span
+                style={{
+                  fontFamily: 'var(--font-jetbrains)',
+                  fontSize: '0.72rem',
+                  color: incident.assigned_to ? 'var(--primary)' : 'var(--muted-foreground)',
+                  flexShrink: 0,
+                }}
+              >
+                {assigneeLabel}
+              </span>
+              <AssigneeCombobox
+                key={`${incident.id}-${incident.assigned_to ?? 'none'}`}
+                team={team}
+                disabled={assigning}
+                onPick={setSelectedAssignee}
+                placeholder={incident.assigned_to ? 'Change assignee…' : 'Search teammates…'}
+              />
+              <button
+                type="button"
+                disabled={!selectedAssignee || assigning}
+                onClick={() => {
+                  if (!selectedAssignee) return
+                  onAssign(selectedAssignee)
+                  setSelectedAssignee('')
+                }}
+                style={{
+                  ...simulateButtonStyle,
+                  opacity: !selectedAssignee || assigning ? 0.6 : 1,
+                }}
+              >
+                {assigning ? 'Assigning…' : 'Assign'}
+              </button>
+            </div>
+          ) : (
+            <div
+              style={{
+                marginTop: 8,
+                fontFamily: 'var(--font-jetbrains)',
+                fontSize: '0.72rem',
+                color: incident.assigned_to ? 'var(--primary)' : 'var(--muted-foreground)',
+              }}
+            >
+              Assignee: {assigneeLabel}
+              {isAssignedToMe && !isAdmin ? ' (you)' : ''}
+            </div>
+          )}
+        </div>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           {hasPendingFix ? (
             <StatusTag kind="active">Awaiting approval</StatusTag>
+          ) : hasMyPendingAssignment ? (
+            <StatusTag kind="active">Assignment pending</StatusTag>
           ) : (
             <StatusTag kind="active">Active</StatusTag>
           )}
-          {!hasPendingFix && (
+          {!hasPendingFix && canSubmitFix && (
             <button
               onClick={onResolve}
               style={resolveButtonStyle}
               onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--primary)')}
               onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
             >
-              Resolve issue
+              {isAdmin ? 'Fix incident' : 'Submit fix'}
+            </button>
+          )}
+          {!isAdmin && !incident.assigned_to && !hasMyPendingAssignment && !hasPendingFix && (
+            <button
+              type="button"
+              onClick={onRequestAssignment}
+              disabled={requestingAssignment}
+              style={{
+                ...resolveButtonStyle,
+                opacity: requestingAssignment ? 0.6 : 1,
+              }}
+            >
+              {requestingAssignment ? 'Requesting…' : 'Request assignment'}
             </button>
           )}
         </span>
       </div>
 
+      {hasMyPendingAssignment && !isAdmin && (
+        <div
+          style={{
+            marginTop: 14,
+            padding: '10px 12px',
+            borderRadius: 8,
+            background: 'rgba(0,214,143,0.06)',
+            border: '1px solid rgba(0,214,143,0.18)',
+            fontFamily: 'var(--font-inter)',
+            fontSize: '0.82rem',
+            color: 'var(--muted-foreground)',
+          }}
+        >
+          Assignment requested — waiting for owner/admin approval.
+        </div>
+      )}
+
+      {incident.assigned_to && !isAssignedToMe && !isAdmin && !hasPendingFix && (
+        <div
+          style={{
+            marginTop: 14,
+            padding: '10px 12px',
+            borderRadius: 8,
+            background: 'rgba(240,192,64,0.06)',
+            border: '1px solid rgba(240,192,64,0.18)',
+            fontFamily: 'var(--font-inter)',
+            fontSize: '0.82rem',
+            color: 'var(--muted-foreground)',
+          }}
+        >
+          This incident is assigned to {assigneeLabel}. Request assignment if you need to take it over.
+        </div>
+      )}
       {hasPendingFix && incident.pendingFix && (
         <div
           style={{
@@ -862,7 +1223,7 @@ function ActiveIncidentCard({
               marginBottom: 6,
             }}
           >
-            {isAdmin ? 'Fix waiting for your review' : 'Fix submitted — waiting for admin approval'}
+            {isAdmin ? 'Fix waiting for your review' : 'Fix submitted — waiting for owner/admin approval'}
           </div>
           <p
             style={{
@@ -875,6 +1236,55 @@ function ActiveIncidentCard({
           >
             {incident.pendingFix.fix_description}
           </p>
+        </div>
+      )}
+
+      {!hasPendingFix && incident.latestDeclinedFix?.review_note && (
+        <div
+          style={{
+            marginTop: 14,
+            padding: '12px 14px',
+            borderRadius: 8,
+            background: 'rgba(255,95,95,0.06)',
+            border: '1px solid rgba(255,95,95,0.2)',
+          }}
+        >
+          <div
+            style={{
+              fontFamily: 'var(--font-jetbrains)',
+              fontSize: '0.68rem',
+              fontWeight: 600,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              color: '#ff8a8a',
+              marginBottom: 6,
+            }}
+          >
+            {isAdmin ? 'Feedback sent — awaiting resubmission' : 'Changes requested'}
+          </div>
+          <p
+            style={{
+              fontFamily: 'var(--font-inter)',
+              fontSize: '0.86rem',
+              lineHeight: 1.55,
+              color: 'var(--foreground)',
+              margin: 0,
+            }}
+          >
+            {incident.latestDeclinedFix.review_note}
+          </p>
+          {!isAdmin && canSubmitFix && (
+            <p
+              style={{
+                margin: '10px 0 0',
+                fontFamily: 'var(--font-inter)',
+                fontSize: '0.8rem',
+                color: 'var(--muted-foreground)',
+              }}
+            >
+              Update your fix and click Submit fix again when ready.
+            </p>
+          )}
         </div>
       )}
 

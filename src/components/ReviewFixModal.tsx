@@ -1,20 +1,22 @@
 import { useEffect, useState } from 'react'
 import * as s from './authStyles'
 
-type ResolveIncidentModalProps = {
+type ReviewFixModalProps = {
   incidentTitle: string
-  canAutoResolve: boolean
+  submitterUsername: string | null
+  fixDescription: string
   onClose: () => void
-  onSubmit: (fixDescription: string) => Promise<void>
+  onSubmit: (feedback: string) => Promise<void>
 }
 
-export default function ResolveIncidentModal({
+export default function ReviewFixModal({
   incidentTitle,
-  canAutoResolve,
+  submitterUsername,
+  fixDescription,
   onClose,
   onSubmit,
-}: ResolveIncidentModalProps) {
-  const [description, setDescription] = useState('')
+}: ReviewFixModalProps) {
+  const [feedback, setFeedback] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [isOpen, setIsOpen] = useState(false)
@@ -31,18 +33,18 @@ export default function ResolveIncidentModal({
   }
 
   const handleSubmit = async () => {
-    if (!description.trim()) {
-      setError('Describe what you fixed before submitting.')
+    if (!feedback.trim()) {
+      setError('Share what needs to change before sending feedback.')
       return
     }
 
     setSubmitting(true)
     setError(null)
     try {
-      await onSubmit(description.trim())
+      await onSubmit(feedback.trim())
       close()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not submit your fix.')
+      setError(err instanceof Error ? err.message : 'Could not send feedback.')
       setSubmitting(false)
     }
   }
@@ -66,7 +68,7 @@ export default function ResolveIncidentModal({
       <div
         role="dialog"
         aria-modal="true"
-        aria-labelledby="resolve-incident-title"
+        aria-labelledby="review-fix-title"
         onClick={(e) => e.stopPropagation()}
         style={{
           width: '100%',
@@ -81,7 +83,7 @@ export default function ResolveIncidentModal({
         }}
       >
         <h2
-          id="resolve-incident-title"
+          id="review-fix-title"
           style={{
             fontFamily: 'var(--font-inter)',
             fontWeight: 800,
@@ -90,7 +92,7 @@ export default function ResolveIncidentModal({
             marginBottom: 8,
           }}
         >
-          {canAutoResolve ? 'Fix incident' : 'Submit fix'}
+          Decline / Request changes
         </h2>
         <p
           style={{
@@ -98,30 +100,64 @@ export default function ResolveIncidentModal({
             fontSize: '0.88rem',
             lineHeight: 1.55,
             color: 'var(--muted-foreground)',
-            marginBottom: 16,
+            marginBottom: 14,
           }}
         >
-          {canAutoResolve
-            ? `Describe what was fixed for "${incidentTitle}". The incident will be marked resolved immediately.`
-            : `Describe what you fixed for "${incidentTitle}". An owner or admin will review your submission before the incident is marked resolved.`}
+          {submitterUsername ? `@${submitterUsername}'s` : 'The teammate’s'} fix for “{incidentTitle}” needs
+          more work. Your feedback will be shown on the incident so they can revise and resubmit.
         </p>
+
+        <div
+          style={{
+            marginBottom: 16,
+            padding: '12px 14px',
+            borderRadius: 8,
+            background: 'rgba(240,192,64,0.08)',
+            border: '1px solid rgba(240,192,64,0.22)',
+          }}
+        >
+          <div
+            style={{
+              fontFamily: 'var(--font-jetbrains)',
+              fontSize: '0.68rem',
+              fontWeight: 600,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              color: '#f0c040',
+              marginBottom: 6,
+            }}
+          >
+            Submitted fix
+          </div>
+          <p
+            style={{
+              fontFamily: 'var(--font-inter)',
+              fontSize: '0.86rem',
+              lineHeight: 1.55,
+              color: 'var(--foreground)',
+              margin: 0,
+            }}
+          >
+            {fixDescription}
+          </p>
+        </div>
 
         {error && <div style={{ ...s.errorBox, marginTop: 0 }}>{error}</div>}
 
-        <label htmlFor="fix-description" style={s.label}>
-          What did you fix?
+        <label htmlFor="fix-feedback" style={s.label}>
+          Feedback for the assignee
         </label>
         <textarea
-          id="fix-description"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder="Explain the root cause and the changes you made to fix it…"
-          rows={5}
+          id="fix-feedback"
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          placeholder="Explain what is missing, incorrect, or what they should try next…"
+          rows={4}
           autoFocus
           style={{
             ...s.input,
             resize: 'vertical',
-            minHeight: 120,
+            minHeight: 100,
             marginBottom: 18,
           }}
         />
@@ -156,7 +192,7 @@ export default function ResolveIncidentModal({
               cursor: submitting ? 'default' : 'pointer',
             }}
           >
-            {submitting ? 'Submitting…' : canAutoResolve ? 'Mark resolved' : 'Submit fix'}
+            {submitting ? 'Sending…' : 'Send feedback'}
           </button>
         </div>
       </div>

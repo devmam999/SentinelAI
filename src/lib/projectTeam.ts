@@ -43,6 +43,21 @@ export type StoredIncident = {
   slack_posted: boolean
   created_at: string
   resolved_at: string | null
+  assigned_to: string | null
+  assignee_username?: string | null
+}
+
+export type IncidentAssignmentRequest = {
+  id: string
+  incident_id: string
+  requested_by: string
+  status: 'pending' | 'approved' | 'declined'
+  reviewed_by: string | null
+  reviewed_at: string | null
+  created_at: string
+  requester_username?: string | null
+  incident_number?: number
+  incident_title?: string
 }
 
 export type IncidentFix = {
@@ -87,6 +102,20 @@ export function canReviewFixes(role: ProjectRole | null): boolean {
 
 export function canAutoResolveIncidents(role: ProjectRole | null): boolean {
   return role === 'owner' || role === 'admin'
+}
+
+export function canCreateIncidents(role: ProjectRole | null): boolean {
+  return role === 'owner' || role === 'admin'
+}
+
+export function canSubmitIncidentFix(
+  role: ProjectRole | null,
+  assignedTo: string | null | undefined,
+  userId: string | null | undefined,
+): boolean {
+  if (!userId) return false
+  if (canAutoResolveIncidents(role)) return true
+  return assignedTo === userId
 }
 
 export async function getMyProjectRole(projectId: string): Promise<ProjectRole | null> {
@@ -564,8 +593,20 @@ export async function fetchProjectIncidents(projectId: string): Promise<StoredIn
 
   if (error || !data) return []
 
+  const assigneeIds = [...new Set(data.map((row) => row.assigned_to).filter(Boolean))] as string[]
+  const assigneeNames = new Map<string, string | null>()
+
+  await Promise.all(
+    assigneeIds.map(async (userId) => {
+      const { data: profile } = await supabase.from('profiles').select('username').eq('id', userId).maybeSingle()
+      assigneeNames.set(userId, profile?.username ?? null)
+    }),
+  )
+
   return data.map((row) => ({
     ...row,
+    assigned_to: row.assigned_to ?? null,
+    assignee_username: row.assigned_to ? assigneeNames.get(row.assigned_to) ?? null : null,
     analysis: (row.analysis as IncidentAnalysis | null) ?? null,
     status: row.status as StoredIncident['status'],
   }))
@@ -664,6 +705,74 @@ export async function reviewIncidentFix(
     p_fix_id: fixId,
     p_approve: approve,
     p_review_note: reviewNote?.trim() || null,
+  })
+  return { error: error?.message ?? null }
+}
+
+export async function fetchIncidentAssignmentRequests(projectId: string): Promise<IncidentAssignmentRequest[]> {
+  const { data: incidents, error: incidentError } = await supabase
+    .from('incidents')
+    .select('id, incident_number, title')
+    .eq('project_id', projectId)
+
+  if (incidentError || !incidents?.length) return []
+
+  const incidentIds = incidents.map((i) => i.id)
+  const incidentMap = new Map(incidents.map((i) => [i.id, i]))
+
+  const { data: requests, error } = await supabase
+    .from('incident_assignment_requests')
+    .select('*')
+    .in('incident_id', incidentIds)
+    .order('created_at', { ascending: false })
+
+  if (error || !requests) return []
+
+  return Promise.all(
+    requests.map(async (request) => {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('username')
+        .eq('id', request.requested_by)
+        .maybeSingle()
+
+      const incident = incidentMap.get(request.incident_id)
+      return {
+        ...request,
+        status: request.status as IncidentAssignmentRequest['status'],
+        requester_username: profile?.username ?? null,
+        incident_number: incident?.incident_number,
+        incident_title: incident?.title,
+      }
+    }),
+  )
+}
+
+export async function assignIncident(
+  incidentId: string,
+  assigneeUserId: string,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase.rpc('assign_incident', {
+    p_incident_id: incidentId,
+    p_assignee_id: assigneeUserId,
+  })
+  return { error: error?.message ?? null }
+}
+
+export async function requestIncidentAssignment(incidentId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase.rpc('request_incident_assignment', {
+    p_incident_id: incidentId,
+  })
+  return { error: error?.message ?? null }
+}
+
+export async function reviewIncidentAssignment(
+  requestId: string,
+  approve: boolean,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase.rpc('review_incident_assignment', {
+    p_request_id: requestId,
+    p_approve: approve,
   })
   return { error: error?.message ?? null }
 }

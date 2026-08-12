@@ -38,7 +38,8 @@ Alert ─▶ FastAPI backend
 The **frontend** (React) lets users sign up with a username, create and join
 projects (GitHub repo, Slack webhook, runbooks — **validated against GitHub and
 Slack before save**), collaborate via **roles and invitations**, manage account
-settings, and run incident analyses with **fix approval workflows**. **Supabase** handles authentication, profiles,
+settings, and run **owner/admin-controlled incident workflows** with assignment
+and fix approval. **Supabase** handles authentication, profiles,
 projects, team membership, invitations, persisted incidents, and runbook
 storage. The **backend** (FastAPI, Docker) runs the AI incident pipeline and
 persists ChromaDB vectors on a dedicated volume.
@@ -271,6 +272,8 @@ database**, and **runbook file storage**.
    | 7 | **`project_members`**, **`project_invitations`**, **`incidents`**, **`incident_fixes`** + team/incident RPCs |
    | 8 | **`project_edit_requests`**, ownership transfer, leave project, role management |
    | **9** | **Security hardening** — stricter RLS on `projects` / `project_members`, `can_access_project`, and **`SECURITY DEFINER`** RPCs so invited users can list and open shared projects (see [Row Level Security](#row-level-security-rls) below) |
+   | **10** | **Incident assignment workflow** — `assigned_to` on incidents, `incident_assignment_requests`, admin-only incident creation, assign / request / review RPCs (see [Incidents & fixes](#incidents--fixes)) |
+   | **11** | **Fix review feedback** — `review_incident_fix` requires feedback when declining / requesting changes |
    | RPCs | Auth: `resolve_login_email`, `is_username_available`, `update_username`, `delete_own_account` |
    | | Teams: `invite_project_member`, `accept_project_invitation`, `get_my_pending_invitations`, `transfer_project_ownership`, `leave_project`, … |
    | | Access: **`get_my_projects()`**, **`get_accessible_project(uuid)`**, `get_my_project_role(uuid)` |
@@ -366,9 +369,9 @@ Each project has three roles. The dashboard lists projects you **own** and proje
 
 | Role | Label in UI | What they can do |
 | ---- | ----------- | ---------------- |
-| **Owner** | Owner | Delete the project, transfer ownership, promote/demote admins, invite teammates, remove members, approve edit requests and incident fixes, auto-resolve incidents |
-| **Admin** | Admin | Invite teammates, remove **users** (not other admins), submit **edit requests** for owner approval, review/approve incident fixes, auto-resolve incidents |
-| **Member** | User | View the project, run incident analysis, propose fixes (owner/admin must approve before an incident is marked resolved) |
+| **Owner** | Owner | Delete the project, transfer ownership, promote/demote admins, invite teammates, remove members, approve edit requests, **report/analyze incidents**, assign incidents, review assignment requests and incident fixes, fix incidents directly |
+| **Admin** | Admin | Invite teammates, remove **users** (not other admins), submit **edit requests** for owner approval, **report/analyze incidents**, assign incidents, review assignment requests and incident fixes, fix incidents directly |
+| **Member** | User | View active incidents and AI analysis, **request assignment** to an incident (owner/admin must approve), submit fixes **only when assigned** (owner/admin must approve before resolve) |
 
 **Invitations**
 
@@ -401,10 +404,80 @@ Each project has three roles. The dashboard lists projects you **own** and proje
 
 **Incidents & fixes**
 
-- Analyses are saved as **incidents** in Supabase (not just ephemeral UI state).
-- Teammates propose a fix description; owners/admins **accept** or **decline** it (or auto-resolve if they have permission).
-- Resolved incidents appear in project history.
+Only **owners and admins** can describe an alert and run **Analyze Incident** (the RAG pipeline: GitHub commits → Chroma runbook search → Gemini → optional Slack). Regular **users** cannot trigger analysis — this prevents low-privilege members from injecting arbitrary alert text into the pipeline.
+
+**Incident workflow**
+
+```mermaid
+flowchart TB
+  subgraph report [Report — Owner / Admin only]
+    ALERT[Describe alert] --> ANALYZE[Analyze Incident]
+    ANALYZE --> RAG[GitHub + Chroma + Gemini]
+    RAG --> SAVE[(Saved incident — active)]
+  end
+
+  subgraph assign [Assignment]
+    SAVE --> VIEW[All members view active incidents]
+    VIEW --> ADMIN_ASSIGN[Owner/Admin assigns teammate]
+    VIEW --> USER_REQ[User requests assignment]
+    USER_REQ --> ADMIN_APPROVE{Owner/Admin approves?}
+    ADMIN_APPROVE -->|Yes| ASSIGNED[User assigned]
+    ADMIN_APPROVE -->|No| VIEW
+    ADMIN_ASSIGN --> ASSIGNED
+  end
+
+  subgraph resolve [Resolution]
+    ASSIGNED --> USER_FIX[Assigned user: Submit fix + description]
+    ADMIN_ASSIGN --> ADMIN_FIX[Owner/Admin: Fix incident + description]
+    USER_FIX --> FIX_REVIEW{Owner/Admin reviews fix}
+    FIX_REVIEW -->|Accept| RESOLVED[(Incident resolved)]
+    FIX_REVIEW -->|Decline / Request changes| FEEDBACK[Feedback shown on incident]
+    FEEDBACK --> USER_FIX
+    ADMIN_FIX --> RESOLVED
+  end
+```
+
+```mermaid
+sequenceDiagram
+  participant U as Assigned user
+  participant A as Owner / Admin
+  participant DB as Supabase
+
+  U->>U: Submit fix (describe what was fixed)
+  U->>DB: submit_incident_fix (pending)
+  A->>A: Review fix description
+  alt Accept
+    A->>DB: review_incident_fix (approve)
+    DB-->>U: Incident resolved
+  else Decline / Request changes
+    A->>A: Enter feedback text
+    A->>DB: review_incident_fix (decline + review_note)
+    DB-->>U: Feedback visible on incident card
+    U->>U: Revise and Submit fix again
+  end
+```
+
+| Step | Who | What happens |
+| ---- | --- | ------------ |
+| **Report** | Owner / Admin | Describes the alert → backend runs RAG → incident saved as **active** |
+| **View** | All members | See active incidents, AI analysis, assignee, and alert description |
+| **Assign** | Owner / Admin | Pick any project member from the assign dropdown on an incident card |
+| **Request assignment** | User | Clicks **Request assignment** on an unassigned incident; owner/admin **Approve** or **Decline** in **Pending assignment requests** |
+| **Fix (admin)** | Owner / Admin | **Fix incident** → describe what was fixed → incident resolved immediately |
+| **Fix (user)** | Assigned user only | **Submit fix** → describe what was fixed → owner/admin **Accept** or **Decline / Request changes** with written feedback |
+| **Resubmit** | Assigned user | After decline, feedback appears on the incident card; user revises and **Submit fix** again |
+
+**Fix review UI**
+
+- **Submit fix** opens a modal with a required “What did you fix?” text area (assignees and admins).
+- **Pending fix reviews** (owners/admins) show the submitted description plus **Accept fix** or **Decline / Request changes**.
+- **Decline / Request changes** opens a feedback modal; feedback is stored as `review_note` and shown on the incident card so the assignee can revise and resubmit.
+
+- Analyses are saved as **incidents** in Supabase (not ephemeral UI state).
+- Database RLS allows only admins to **insert** incidents; assignment and fix rules are enforced in RPCs (`assign_incident`, `request_incident_assignment`, `review_incident_assignment`, `submit_incident_fix`).
 - **Slack posting is best-effort:** if analysis succeeds but the webhook fails (e.g. revoked URL, `no_service`), the incident is still saved and the UI shows a **warning** with a clear Slack error — analysis is not rolled back.
+
+Re-run sections **10–11** at the bottom of [`supabase/schema.sql`](supabase/schema.sql) if assignment columns, RPCs, or fix-feedback validation are missing.
 
 ### Integration validation (GitHub & Slack)
 
@@ -647,12 +720,8 @@ curl -X POST http://localhost:8000/api/incidents/analyze \
 4. **Invite teammates** from the project page (**Invite** → Team & permissions).
    They accept from the **notifications bell** on their dashboard (shared
    projects appear after section **9** RLS is applied in Supabase).
-5. Open the project and click **Analyze Incident**. Sentinel validates and
-   indexes runbooks, scans commits, reasons with Gemini, saves the incident,
-   shows results on the page, and posts to Slack when the webhook is valid.
-   If Slack fails, the incident is still saved and a warning explains the webhook issue.
-6. Teammates **propose fixes**; owners/admins review pending fixes on the project
-   page (or resolve directly if permitted).
+5. Open the project. **Owners/admins:** describe an alert under **Report incident** and click **Analyze Incident**. **Users:** view active incidents, request assignment, and submit fixes once assigned.
+6. Owners/admins **assign** incidents or **approve assignment requests**; assigned users **Submit fix** with a description. Owners/admins **Accept** or **Decline / Request changes** with feedback the assignee can see and act on.
 7. Use **Settings** to update username, email, or password, or delete your
    account (`sudo delete [username]`). Owners delete projects from the dashboard
    (`sudo delete [Project Name]`). Non-owners can **Leave project** from the

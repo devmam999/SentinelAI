@@ -407,6 +407,7 @@ create table if not exists public.incidents (
   alert_description text,
   analysis         jsonb,
   slack_posted     boolean     not null default false,
+  assigned_to      uuid        references auth.users (id) on delete set null,
   created_by       uuid        references auth.users (id) on delete set null,
   created_at       timestamptz not null default now(),
   resolved_at      timestamptz,
@@ -1871,3 +1872,389 @@ $$;
 
 grant execute on function public.get_accessible_project(uuid) to authenticated;
 grant execute on function public.get_my_projects() to authenticated;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 10. Incident assignment workflow + admin-only incident creation
+-- ─────────────────────────────────────────────────────────────────────────────
+
+alter table public.incidents
+  add column if not exists assigned_to uuid references auth.users (id) on delete set null;
+
+create index if not exists incidents_assigned_to_idx on public.incidents (assigned_to);
+
+create table if not exists public.incident_assignment_requests (
+  id              uuid        primary key default gen_random_uuid(),
+  incident_id     uuid        not null references public.incidents (id) on delete cascade,
+  requested_by    uuid        not null references auth.users (id) on delete cascade,
+  status          text        not null default 'pending'
+                  check (status in ('pending', 'approved', 'declined')),
+  reviewed_by     uuid        references auth.users (id) on delete set null,
+  reviewed_at     timestamptz,
+  created_at      timestamptz not null default now()
+);
+
+create unique index if not exists incident_assignment_one_pending_per_user_idx
+  on public.incident_assignment_requests (incident_id, requested_by)
+  where status = 'pending';
+
+create or replace function public.is_project_member(
+  p_project_id uuid,
+  p_user_id uuid default null
+)
+returns boolean
+language sql
+security definer
+set search_path = ''
+stable
+as $$
+  select exists (
+    select 1
+    from public.projects p
+    where p.id = p_project_id
+      and p.user_id = coalesce(p_user_id, (select auth.uid()))
+  )
+  or exists (
+    select 1
+    from public.project_members pm
+    where pm.project_id = p_project_id
+      and pm.user_id = coalesce(p_user_id, (select auth.uid()))
+  );
+$$;
+
+-- Only owners/admins may create incidents (members must not trigger analysis saves).
+drop policy if exists "Members can create incidents" on public.incidents;
+drop policy if exists "Admins can create incidents" on public.incidents;
+create policy "Admins can create incidents"
+  on public.incidents for insert
+  with check (public.is_project_admin(project_id));
+
+alter table public.incident_assignment_requests enable row level security;
+
+drop policy if exists "Members can view assignment requests" on public.incident_assignment_requests;
+create policy "Members can view assignment requests"
+  on public.incident_assignment_requests for select
+  using (
+    exists (
+      select 1
+      from public.incidents i
+      where i.id = incident_id
+        and (
+          public.is_project_admin(i.project_id)
+          or requested_by = (select auth.uid())
+        )
+    )
+  );
+
+create or replace function public.assign_incident(
+  p_incident_id uuid,
+  p_assignee_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  inc record;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select * into inc
+  from public.incidents
+  where id = p_incident_id;
+
+  if inc.id is null then
+    raise exception 'Incident not found';
+  end if;
+
+  if not public.is_project_admin(inc.project_id) then
+    raise exception 'Only project owners and admins can assign incidents';
+  end if;
+
+  if inc.status <> 'active' then
+    raise exception 'This incident is already resolved';
+  end if;
+
+  if not public.is_project_member(inc.project_id, p_assignee_id) then
+    raise exception 'Assignee must be a project member';
+  end if;
+
+  update public.incidents
+  set assigned_to = p_assignee_id
+  where id = inc.id;
+
+  update public.incident_assignment_requests
+  set status = 'declined',
+      reviewed_by = auth.uid(),
+      reviewed_at = now()
+  where incident_id = inc.id
+    and status = 'pending'
+    and requested_by <> p_assignee_id;
+end;
+$$;
+
+create or replace function public.request_incident_assignment(p_incident_id uuid)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  inc record;
+  request_id uuid;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select * into inc
+  from public.incidents
+  where id = p_incident_id;
+
+  if inc.id is null then
+    raise exception 'Incident not found';
+  end if;
+
+  if not public.can_access_project(inc.project_id) then
+    raise exception 'Not allowed';
+  end if;
+
+  if public.is_project_admin(inc.project_id) then
+    raise exception 'Owners and admins assign incidents directly';
+  end if;
+
+  if inc.status <> 'active' then
+    raise exception 'This incident is already resolved';
+  end if;
+
+  if inc.assigned_to is not null then
+    raise exception 'This incident is already assigned';
+  end if;
+
+  if exists (
+    select 1
+    from public.incident_assignment_requests r
+    where r.incident_id = inc.id
+      and r.requested_by = auth.uid()
+      and r.status = 'pending'
+  ) then
+    raise exception 'You already have a pending assignment request for this incident';
+  end if;
+
+  insert into public.incident_assignment_requests (incident_id, requested_by, status)
+  values (inc.id, auth.uid(), 'pending')
+  returning id into request_id;
+
+  return request_id;
+end;
+$$;
+
+create or replace function public.review_incident_assignment(
+  p_request_id uuid,
+  p_approve boolean
+)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  req record;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select r.*, i.project_id, i.status as incident_status, i.assigned_to
+  into req
+  from public.incident_assignment_requests r
+  join public.incidents i on i.id = r.incident_id
+  where r.id = p_request_id;
+
+  if req.id is null then
+    raise exception 'Assignment request not found';
+  end if;
+
+  if not public.is_project_admin(req.project_id) then
+    raise exception 'Only project owners and admins can review assignment requests';
+  end if;
+
+  if req.status <> 'pending' then
+    raise exception 'This assignment request has already been reviewed';
+  end if;
+
+  if req.incident_status <> 'active' then
+    raise exception 'This incident is already resolved';
+  end if;
+
+  if p_approve then
+    update public.incidents
+    set assigned_to = req.requested_by
+    where id = req.incident_id;
+
+    update public.incident_assignment_requests
+    set status = 'approved',
+        reviewed_by = auth.uid(),
+        reviewed_at = now()
+    where id = req.id;
+
+    update public.incident_assignment_requests
+    set status = 'declined',
+        reviewed_by = auth.uid(),
+        reviewed_at = now()
+    where incident_id = req.incident_id
+      and status = 'pending'
+      and id <> req.id;
+  else
+    update public.incident_assignment_requests
+    set status = 'declined',
+        reviewed_by = auth.uid(),
+        reviewed_at = now()
+    where id = req.id;
+  end if;
+end;
+$$;
+
+-- Members may only submit fixes when assigned; admins/owners may always fix.
+create or replace function public.submit_incident_fix(
+  p_incident_id uuid,
+  p_fix_description text
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  inc record;
+  fix_id uuid;
+  trimmed text := trim(p_fix_description);
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  if trimmed = '' then
+    raise exception 'Describe what you fixed before submitting';
+  end if;
+
+  select * into inc
+  from public.incidents
+  where id = p_incident_id;
+
+  if inc.id is null then
+    raise exception 'Incident not found';
+  end if;
+
+  if not public.can_access_project(inc.project_id) then
+    raise exception 'Not allowed';
+  end if;
+
+  if inc.status <> 'active' then
+    raise exception 'This incident is already resolved';
+  end if;
+
+  if exists (
+    select 1 from public.incident_fixes f
+    where f.incident_id = inc.id and f.status = 'pending'
+  ) then
+    raise exception 'A fix is already waiting for admin review';
+  end if;
+
+  if public.is_project_admin(inc.project_id) then
+    insert into public.incident_fixes (
+      incident_id, submitted_by, fix_description, status, reviewed_by, reviewed_at
+    )
+    values (inc.id, auth.uid(), trimmed, 'approved', auth.uid(), now())
+    returning id into fix_id;
+
+    update public.incidents
+    set status = 'resolved', resolved_at = now()
+    where id = inc.id;
+
+    return fix_id;
+  end if;
+
+  if inc.assigned_to is null or inc.assigned_to <> auth.uid() then
+    raise exception 'You must be assigned to this incident before submitting a fix';
+  end if;
+
+  insert into public.incident_fixes (incident_id, submitted_by, fix_description, status)
+  values (inc.id, auth.uid(), trimmed, 'pending')
+  returning id into fix_id;
+
+  return fix_id;
+end;
+$$;
+
+grant execute on function public.is_project_member(uuid, uuid) to authenticated;
+grant execute on function public.assign_incident(uuid, uuid) to authenticated;
+grant execute on function public.request_incident_assignment(uuid) to authenticated;
+grant execute on function public.review_incident_assignment(uuid, boolean) to authenticated;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 11. Fix review feedback (require notes when requesting changes)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create or replace function public.review_incident_fix(
+  p_fix_id uuid,
+  p_approve boolean,
+  p_review_note text default null
+)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  fix_row record;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select f.*, i.project_id, i.status as incident_status
+  into fix_row
+  from public.incident_fixes f
+  join public.incidents i on i.id = f.incident_id
+  where f.id = p_fix_id;
+
+  if fix_row.id is null then
+    raise exception 'Fix submission not found';
+  end if;
+
+  if not public.is_project_admin(fix_row.project_id) then
+    raise exception 'Only project admins can review fixes';
+  end if;
+
+  if fix_row.status <> 'pending' then
+    raise exception 'This fix has already been reviewed';
+  end if;
+
+  if not p_approve and nullif(trim(coalesce(p_review_note, '')), '') is null then
+    raise exception 'Provide feedback when requesting changes';
+  end if;
+
+  if p_approve then
+    update public.incident_fixes
+    set status = 'approved',
+        reviewed_by = auth.uid(),
+        reviewed_at = now(),
+        review_note = nullif(trim(coalesce(p_review_note, '')), '')
+    where id = fix_row.id;
+
+    update public.incidents
+    set status = 'resolved', resolved_at = now()
+    where id = fix_row.incident_id;
+  else
+    update public.incident_fixes
+    set status = 'declined',
+        reviewed_by = auth.uid(),
+        reviewed_at = now(),
+        review_note = nullif(trim(coalesce(p_review_note, '')), '')
+    where id = fix_row.id;
+  end if;
+end;
+$$;
