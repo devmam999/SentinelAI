@@ -139,7 +139,7 @@ function formatHttpErrorMessage(
   }
 
   if (status === 429) {
-    return formatApiError(`429 RESOURCE_EXHAUSTED ${detail || statusText}`)
+    return formatApiError(detail || `429 RESOURCE_EXHAUSTED ${statusText}`)
   }
 
   if ((status === 502 || status === 503) && !detail) {
