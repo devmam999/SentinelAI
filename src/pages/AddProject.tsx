@@ -14,6 +14,32 @@ const RUNBOOK_REQUIRED_SECTIONS = [
   'What action to take for each error',
 ] as const
 
+type TriggerMode = 'manual' | 'autonomous'
+
+/** Autonomous detection is not shipped yet — keep disabled in the UI. */
+const AUTONOMOUS_TRIGGER_ENABLED = false
+
+const TRIGGER_MODE_OPTIONS: {
+  value: TriggerMode
+  title: string
+  description: string
+  disabled?: boolean
+  disabledNote?: string
+}[] = [
+  {
+    value: 'manual',
+    title: 'Manual trigger',
+    description: 'You manually describe the issue and then trigger the AI response.',
+  },
+  {
+    value: 'autonomous',
+    title: 'Autonomous agent',
+    description: 'SentinelAI will automatically run when an issue happens.',
+    disabled: !AUTONOMOUS_TRIGGER_ENABLED,
+    disabledNote: 'Autonomous mode is currently a work in progress.',
+  },
+]
+
 type RunbookFileError = {
   id: string
   fileName: string
@@ -34,6 +60,7 @@ export default function AddProject() {
   const [existingRunbooks, setExistingRunbooks] = useState<string[]>([])
   // Newly selected files to upload on save.
   const [files, setFiles] = useState<File[]>([])
+  const [triggerMode, setTriggerMode] = useState<TriggerMode>('manual')
   const [error, setError] = useState<string | null>(null)
   const [githubFieldError, setGithubFieldError] = useState<string | null>(null)
   const [slackFieldError, setSlackFieldError] = useState<string | null>(null)
@@ -77,6 +104,8 @@ export default function AddProject() {
             .map((r: string) => r.trim())
             .filter(Boolean),
         )
+        const savedMode = data.trigger_mode === 'autonomous' ? 'autonomous' : 'manual'
+        setTriggerMode(AUTONOMOUS_TRIGGER_ENABLED ? savedMode : 'manual')
       }
       setInitializing(false)
     }
@@ -253,6 +282,10 @@ export default function AddProject() {
       setError('Please upload at least one runbook (.md or .pdf).')
       return
     }
+    if (triggerMode === 'autonomous' && !slackWebhook.trim()) {
+      setError('Autonomous mode requires a Slack webhook URL.')
+      return
+    }
 
     const integrationsValid = await validateIntegrations()
     if (!integrationsValid) return
@@ -311,11 +344,14 @@ export default function AddProject() {
     }
 
     const runbookPaths = [...existingRunbooks, ...uploadedPaths]
+    const resolvedTriggerMode: TriggerMode =
+      AUTONOMOUS_TRIGGER_ENABLED && triggerMode === 'autonomous' ? 'autonomous' : 'manual'
     const payload = {
       name: name.trim(),
       github_repo: githubRepo.trim() || null,
       slack_webhook: slackWebhook.trim() || null,
       runbooks: runbookPaths.join('\n') || null,
+      trigger_mode: resolvedTriggerMode,
     }
 
     const { error } = isEditing
@@ -787,6 +823,105 @@ export default function AddProject() {
               </div>
             )}
           </div>
+
+          <fieldset style={{ border: 'none', padding: 0, margin: '0 0 28px' }}>
+            <legend style={{ ...s.label, marginBottom: 12, padding: 0 }}>Incident trigger</legend>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {TRIGGER_MODE_OPTIONS.map((option) => {
+                const selected = triggerMode === option.value
+                const disabled = Boolean(option.disabled)
+                return (
+                  <label
+                    key={option.value}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 12,
+                      padding: '14px 16px',
+                      borderRadius: 8,
+                      border: `1px solid ${selected ? 'rgba(0,214,143,0.45)' : 'var(--border)'}`,
+                      background: selected ? 'rgba(0,214,143,0.06)' : 'var(--card)',
+                      cursor: disabled ? 'not-allowed' : 'pointer',
+                      opacity: disabled ? 0.72 : 1,
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="trigger-mode"
+                      value={option.value}
+                      checked={selected}
+                      disabled={disabled}
+                      onChange={() => {
+                        if (!disabled) setTriggerMode(option.value)
+                      }}
+                      style={{
+                        marginTop: 3,
+                        width: 16,
+                        height: 16,
+                        accentColor: 'var(--primary)',
+                        flexShrink: 0,
+                        cursor: disabled ? 'not-allowed' : 'pointer',
+                      }}
+                    />
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span
+                        style={{
+                          display: 'block',
+                          fontFamily: 'var(--font-inter)',
+                          fontSize: '0.92rem',
+                          fontWeight: 600,
+                          color: 'var(--foreground)',
+                          marginBottom: 4,
+                        }}
+                      >
+                        {option.title}
+                      </span>
+                      <span
+                        style={{
+                          display: 'block',
+                          fontFamily: 'var(--font-inter)',
+                          fontSize: '0.82rem',
+                          color: 'var(--muted-foreground)',
+                          lineHeight: 1.45,
+                        }}
+                      >
+                        {option.description}
+                      </span>
+                      {option.disabledNote && (
+                        <span
+                          style={{
+                            display: 'block',
+                            marginTop: 8,
+                            fontFamily: 'var(--font-inter)',
+                            fontSize: '0.78rem',
+                            fontWeight: 600,
+                            color: 'rgba(240,192,64,0.95)',
+                            lineHeight: 1.4,
+                          }}
+                        >
+                          {option.disabledNote}
+                        </span>
+                      )}
+                      {option.value === 'autonomous' && AUTONOMOUS_TRIGGER_ENABLED && (
+                        <span
+                          style={{
+                            display: 'block',
+                            marginTop: 6,
+                            fontFamily: 'var(--font-inter)',
+                            fontSize: '0.78rem',
+                            color: 'var(--muted-foreground)',
+                            lineHeight: 1.4,
+                          }}
+                        >
+                          Requires a Slack webhook URL above.
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+          </fieldset>
 
           <div style={{ display: 'flex', gap: 10 }}>
             <button

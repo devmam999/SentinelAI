@@ -2422,3 +2422,11 @@ end;
 $$;
 
 grant execute on function public.mark_postmortem_posted(uuid) to authenticated;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 13. Project incident trigger mode (manual vs autonomous)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+alter table public.projects
+  add column if not exists trigger_mode text not null default 'manual'
+    check (trigger_mode in ('manual', 'autonomous'));
