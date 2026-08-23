@@ -1,10 +1,18 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { useNavigate, useParams, Link } from 'react-router-dom'
+import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
 import { isApiConfigured, logApiError, validateGithubRepo, validateRunbookFile, validateSlackWebhook } from '../lib/api'
 import { formatApiError, isRateLimitError } from '../lib/formatApiError'
-import { getMyProjectRole, requestProjectEdit, type ProjectRole } from '../lib/projectTeam'
+import {
+  fetchProjectSentryStatus,
+  getMyProjectRole,
+  requestProjectEdit,
+  type ProjectRole,
+  type ProjectSentryStatus,
+} from '../lib/projectTeam'
+import type { SentryConnectionStatus } from '../lib/sentry'
+import SentryAutonomousSetup from '../components/SentryAutonomousSetup'
 import * as s from '../components/authStyles'
 
 const RUNBOOK_REQUIRED_SECTIONS = [
@@ -34,7 +42,8 @@ const TRIGGER_MODE_OPTIONS: {
   {
     value: 'autonomous',
     title: 'Autonomous agent',
-    description: 'SentinelAI will automatically run when an issue happens.',
+    description:
+      'SentinelAI listens for production issues through Sentry and automatically starts incident analysis.',
     disabled: !AUTONOMOUS_TRIGGER_ENABLED,
     disabledNote: 'Autonomous mode is currently a work in progress.',
   },
@@ -49,6 +58,7 @@ type RunbookFileError = {
 
 export default function AddProject() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const { user } = useAuth()
   const { id } = useParams<{ id: string }>()
   const isEditing = Boolean(id)
@@ -61,6 +71,8 @@ export default function AddProject() {
   // Newly selected files to upload on save.
   const [files, setFiles] = useState<File[]>([])
   const [triggerMode, setTriggerMode] = useState<TriggerMode>('manual')
+  const [sentryStatus, setSentryStatus] = useState<SentryConnectionStatus | null>(null)
+  const [sentryOAuthState, setSentryOAuthState] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [githubFieldError, setGithubFieldError] = useState<string | null>(null)
   const [slackFieldError, setSlackFieldError] = useState<string | null>(null)
@@ -76,6 +88,37 @@ export default function AddProject() {
   const [initializing, setInitializing] = useState(isEditing)
 
   const isAdminRequest = isEditing && myRole === 'admin'
+
+  useEffect(() => {
+    const oauth = searchParams.get('sentry_oauth')
+    const sentryError = searchParams.get('sentry_error')
+    if (oauth) {
+      setSentryOAuthState(oauth)
+      if (AUTONOMOUS_TRIGGER_ENABLED) setTriggerMode('autonomous')
+    }
+    if (sentryError) {
+      setError(
+        sentryError === 'authorization_denied'
+          ? 'Sentry authorization was cancelled.'
+          : 'Could not complete Sentry authorization. Try again.',
+      )
+    }
+    if (oauth || sentryError) {
+      const next = new URLSearchParams(searchParams)
+      next.delete('sentry_oauth')
+      next.delete('sentry_error')
+      setSearchParams(next, { replace: true })
+    }
+  }, [searchParams, setSearchParams])
+
+  const toSentryConnectionStatus = (status: ProjectSentryStatus): SentryConnectionStatus => ({
+    connected: status.connected,
+    org_slug: status.org_slug,
+    org_name: status.org_name,
+    project_slug: status.project_slug,
+    project_name: status.project_name,
+    connected_at: status.connected_at,
+  })
 
   useEffect(() => {
     if (!id) return
@@ -106,6 +149,8 @@ export default function AddProject() {
         )
         const savedMode = data.trigger_mode === 'autonomous' ? 'autonomous' : 'manual'
         setTriggerMode(AUTONOMOUS_TRIGGER_ENABLED ? savedMode : 'manual')
+        const sentry = await fetchProjectSentryStatus(id!)
+        setSentryStatus(toSentryConnectionStatus(sentry))
       }
       setInitializing(false)
     }
@@ -282,8 +327,8 @@ export default function AddProject() {
       setError('Please upload at least one runbook (.md or .pdf).')
       return
     }
-    if (triggerMode === 'autonomous' && !slackWebhook.trim()) {
-      setError('Autonomous mode requires a Slack webhook URL.')
+    if (triggerMode === 'autonomous' && AUTONOMOUS_TRIGGER_ENABLED && !sentryStatus?.connected && !sentryOAuthState) {
+      setError('Connect Sentry and select an organization and project before enabling autonomous mode.')
       return
     }
 
@@ -830,94 +875,99 @@ export default function AddProject() {
               {TRIGGER_MODE_OPTIONS.map((option) => {
                 const selected = triggerMode === option.value
                 const disabled = Boolean(option.disabled)
+                const isAutonomous = option.value === 'autonomous'
                 return (
-                  <label
+                  <div
                     key={option.value}
                     style={{
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: 12,
                       padding: '14px 16px',
                       borderRadius: 8,
                       border: `1px solid ${selected ? 'rgba(0,214,143,0.45)' : 'var(--border)'}`,
                       background: selected ? 'rgba(0,214,143,0.06)' : 'var(--card)',
-                      cursor: disabled ? 'not-allowed' : 'pointer',
                       opacity: disabled ? 0.72 : 1,
                     }}
                   >
-                    <input
-                      type="radio"
-                      name="trigger-mode"
-                      value={option.value}
-                      checked={selected}
-                      disabled={disabled}
-                      onChange={() => {
-                        if (!disabled) setTriggerMode(option.value)
-                      }}
+                    <label
                       style={{
-                        marginTop: 3,
-                        width: 16,
-                        height: 16,
-                        accentColor: 'var(--primary)',
-                        flexShrink: 0,
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: 12,
                         cursor: disabled ? 'not-allowed' : 'pointer',
                       }}
-                    />
-                    <span style={{ flex: 1, minWidth: 0 }}>
-                      <span
-                        style={{
-                          display: 'block',
-                          fontFamily: 'var(--font-inter)',
-                          fontSize: '0.92rem',
-                          fontWeight: 600,
-                          color: 'var(--foreground)',
-                          marginBottom: 4,
+                    >
+                      <input
+                        type="radio"
+                        name="trigger-mode"
+                        value={option.value}
+                        checked={selected}
+                        disabled={disabled}
+                        onChange={() => {
+                          if (!disabled) setTriggerMode(option.value)
                         }}
-                      >
-                        {option.title}
-                      </span>
-                      <span
                         style={{
-                          display: 'block',
-                          fontFamily: 'var(--font-inter)',
-                          fontSize: '0.82rem',
-                          color: 'var(--muted-foreground)',
-                          lineHeight: 1.45,
+                          marginTop: 3,
+                          width: 16,
+                          height: 16,
+                          accentColor: 'var(--primary)',
+                          flexShrink: 0,
+                          cursor: disabled ? 'not-allowed' : 'pointer',
                         }}
-                      >
-                        {option.description}
-                      </span>
-                      {option.disabledNote && (
+                      />
+                      <span style={{ flex: 1, minWidth: 0 }}>
                         <span
                           style={{
                             display: 'block',
-                            marginTop: 8,
                             fontFamily: 'var(--font-inter)',
-                            fontSize: '0.78rem',
+                            fontSize: '0.92rem',
                             fontWeight: 600,
-                            color: 'rgba(240,192,64,0.95)',
-                            lineHeight: 1.4,
+                            color: 'var(--foreground)',
+                            marginBottom: 4,
                           }}
                         >
-                          {option.disabledNote}
+                          {option.title}
                         </span>
-                      )}
-                      {option.value === 'autonomous' && AUTONOMOUS_TRIGGER_ENABLED && (
                         <span
                           style={{
                             display: 'block',
-                            marginTop: 6,
                             fontFamily: 'var(--font-inter)',
-                            fontSize: '0.78rem',
+                            fontSize: '0.82rem',
                             color: 'var(--muted-foreground)',
-                            lineHeight: 1.4,
+                            lineHeight: 1.45,
                           }}
                         >
-                          Requires a Slack webhook URL above.
+                          {option.description}
                         </span>
-                      )}
-                    </span>
-                  </label>
+                        {option.disabledNote && (
+                          <span
+                            style={{
+                              display: 'block',
+                              marginTop: 8,
+                              fontFamily: 'var(--font-inter)',
+                              fontSize: '0.78rem',
+                              fontWeight: 600,
+                              color: 'rgba(240,192,64,0.95)',
+                              lineHeight: 1.4,
+                            }}
+                          >
+                            {option.disabledNote}
+                          </span>
+                        )}
+                      </span>
+                    </label>
+
+                    {isAutonomous && (
+                      <SentryAutonomousSetup
+                        projectId={id ?? null}
+                        userId={user?.id ?? null}
+                        enabled={selected && AUTONOMOUS_TRIGGER_ENABLED}
+                        workInProgress={!AUTONOMOUS_TRIGGER_ENABLED}
+                        oauthState={sentryOAuthState}
+                        initialStatus={sentryStatus}
+                        onStatusChange={setSentryStatus}
+                        onClearOAuthState={() => setSentryOAuthState(null)}
+                      />
+                    )}
+                  </div>
                 )
               })}
             </div>

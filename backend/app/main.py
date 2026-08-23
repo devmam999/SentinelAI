@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
-from .api.routes import github, health, incidents, runbooks, slack
+from .api.routes import github, health, incidents, runbooks, sentry, slack
 from .config import get_settings
 
 
@@ -45,6 +45,7 @@ def create_app() -> FastAPI:
     app.include_router(slack.router)
     app.include_router(runbooks.router)
     app.include_router(incidents.router)
+    app.include_router(sentry.router)
 
     return app
 

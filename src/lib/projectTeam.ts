@@ -721,6 +721,42 @@ export async function markPostmortemPosted(incidentId: string): Promise<{ error:
   return { error: error?.message ?? null }
 }
 
+export type ProjectSentryStatus = {
+  connected: boolean
+  org_slug: string | null
+  org_name: string | null
+  project_slug: string | null
+  project_name: string | null
+  connected_at: string | null
+}
+
+export async function fetchProjectSentryStatus(projectId: string): Promise<ProjectSentryStatus> {
+  const { data, error } = await supabase.rpc('get_project_sentry_status', {
+    p_project_id: projectId,
+  })
+
+  if (error || !data?.length) {
+    return {
+      connected: false,
+      org_slug: null,
+      org_name: null,
+      project_slug: null,
+      project_name: null,
+      connected_at: null,
+    }
+  }
+
+  const row = data[0] as ProjectSentryStatus
+  return {
+    connected: Boolean(row.connected),
+    org_slug: row.org_slug ?? null,
+    org_name: row.org_name ?? null,
+    project_slug: row.project_slug ?? null,
+    project_name: row.project_name ?? null,
+    connected_at: row.connected_at ?? null,
+  }
+}
+
 export async function submitIncidentFix(
   incidentId: string,
   fixDescription: string,

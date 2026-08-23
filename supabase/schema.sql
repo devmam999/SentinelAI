@@ -2430,3 +2430,75 @@ grant execute on function public.mark_postmortem_posted(uuid) to authenticated;
 alter table public.projects
   add column if not exists trigger_mode text not null default 'manual'
     check (trigger_mode in ('manual', 'autonomous'));
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 14. Sentry integration for autonomous incident detection
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table if not exists public.project_sentry_connections (
+  project_id     uuid        primary key references public.projects (id) on delete cascade,
+  access_token   text        not null,
+  org_slug       text        not null,
+  org_name       text,
+  project_slug   text        not null,
+  project_name   text,
+  connected_at   timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
+);
+
+create table if not exists public.sentry_oauth_pending (
+  state          text        primary key,
+  project_id     uuid        not null references public.projects (id) on delete cascade,
+  user_id        uuid        not null references auth.users (id) on delete cascade,
+  access_token   text        not null,
+  created_at     timestamptz not null default now(),
+  expires_at     timestamptz not null default (now() + interval '15 minutes')
+);
+
+create index if not exists sentry_oauth_pending_project_id_idx
+  on public.sentry_oauth_pending (project_id);
+
+alter table public.project_sentry_connections enable row level security;
+alter table public.sentry_oauth_pending enable row level security;
+
+-- Tokens stay server-side; members only see org/project metadata via RPC.
+create or replace function public.get_project_sentry_status(p_project_id uuid)
+returns table (
+  connected boolean,
+  org_slug text,
+  org_name text,
+  project_slug text,
+  project_name text,
+  connected_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  if not public.can_access_project(p_project_id) then
+    raise exception 'Not allowed';
+  end if;
+
+  return query
+  select
+    true,
+    c.org_slug,
+    c.org_name,
+    c.project_slug,
+    c.project_name,
+    c.connected_at
+  from public.project_sentry_connections c
+  where c.project_id = p_project_id;
+
+  if not found then
+    return query select false, null::text, null::text, null::text, null::text, null::timestamptz;
+  end if;
+end;
+$$;
+
+grant execute on function public.get_project_sentry_status(uuid) to authenticated;

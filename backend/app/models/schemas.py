@@ -171,3 +171,38 @@ class PostmortemRequest(BaseModel):
 class PostmortemResponse(BaseModel):
     slack_posted: bool
     slack_error: str | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Sentry (autonomous mode)
+# --------------------------------------------------------------------------- #
+class SentryAuthorizeResponse(BaseModel):
+    authorization_url: str
+
+
+class SentryOrg(BaseModel):
+    slug: str
+    name: str
+
+
+class SentryProject(BaseModel):
+    slug: str
+    name: str
+
+
+class SentryProjectListResponse(BaseModel):
+    projects: list[SentryProject]
+
+
+class SentryConnectRequest(BaseModel):
+    state: str
+    org_slug: str
+    project_slug: str
+
+
+class SentryConnectResponse(BaseModel):
+    connected: bool = True
+    org_slug: str
+    org_name: str
+    project_slug: str
+    project_name: str

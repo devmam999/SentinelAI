@@ -52,6 +52,15 @@ class Settings(BaseSettings):
     # Deployed frontend origin for CORS (e.g. your Vercel URL).
     frontend_url: str | None = None
 
+    # --- Sentry (autonomous mode) ---
+    sentry_client_id: str | None = None
+    sentry_client_secret: str | None = None
+    sentry_redirect_uri: str | None = None
+
+    # --- Supabase admin (server-side Sentry token storage) ---
+    supabase_url: str | None = None
+    supabase_service_role_key: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:
