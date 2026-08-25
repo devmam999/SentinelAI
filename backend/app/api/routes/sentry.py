@@ -7,6 +7,7 @@ from fastapi.responses import RedirectResponse
 
 from ...config import get_settings
 from ...models.schemas import (
+    SentryAttachRequest,
     SentryAuthorizeResponse,
     SentryConnectRequest,
     SentryConnectResponse,
@@ -20,10 +21,15 @@ from ...services.sentry_service import SentryNotConfiguredError
 router = APIRouter(prefix="/api/sentry", tags=["sentry"])
 
 
-def _frontend_return_url(project_id: str, *, sentry_oauth: str | None = None, error: str | None = None) -> str:
+def _frontend_return_url(
+    project_id: str | None,
+    *,
+    sentry_oauth: str | None = None,
+    error: str | None = None,
+) -> str:
     settings = get_settings()
     base = (settings.frontend_url or "http://localhost:8443").rstrip("/")
-    path = f"/edit-project/{project_id}"
+    path = f"/edit-project/{project_id}" if project_id else "/add-project"
     params: list[str] = []
     if sentry_oauth:
         params.append(f"sentry_oauth={sentry_oauth}")
@@ -36,17 +42,21 @@ def _frontend_return_url(project_id: str, *, sentry_oauth: str | None = None, er
 
 @router.get("/authorize", response_model=SentryAuthorizeResponse)
 async def authorize(
-    project_id: str = Query(..., description="SentinelAI project id."),
     user_id: str = Query(..., description="Authenticated Supabase user id."),
+    project_id: str | None = Query(default=None, description="SentinelAI project id (optional for new projects)."),
 ) -> SentryAuthorizeResponse:
     """Return the Sentry OAuth URL for the user to authorize incident access."""
 
     try:
-        allowed = await supabase_admin.user_can_manage_project(user_id, project_id)
-        if not allowed:
-            raise HTTPException(status_code=403, detail="You do not have permission to connect Sentry for this project.")
+        if project_id:
+            allowed = await supabase_admin.user_can_manage_project(user_id, project_id)
+            if not allowed:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You do not have permission to connect Sentry for this project.",
+                )
 
-        url, _state = sentry_service.build_authorization_url(project_id, user_id)
+        url, _state = sentry_service.build_authorization_url(user_id, project_id)
         return SentryAuthorizeResponse(authorization_url=url)
     except SentryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -62,14 +72,15 @@ async def callback(
 ) -> RedirectResponse:
     """OAuth redirect target — exchanges the code and returns to the project editor."""
 
-    if error or not code or not state:
-        project_id = ""
+    project_id: str | None = None
+    if state:
         try:
-            if state:
-                project_id = sentry_service.parse_oauth_state(state)["project_id"]
+            project_id = sentry_service.parse_oauth_state(state)["project_id"]
         except ValueError:
             pass
-        if project_id:
+
+    if error or not code or not state:
+        if state:
             return RedirectResponse(_frontend_return_url(project_id, error=error or "authorization_denied"))
         raise HTTPException(status_code=400, detail=error or "Sentry authorization failed.")
 
@@ -78,12 +89,13 @@ async def callback(
         project_id = parsed["project_id"]
         user_id = parsed["user_id"]
 
-        allowed = await supabase_admin.user_can_manage_project(user_id, project_id)
-        if not allowed:
-            return RedirectResponse(_frontend_return_url(project_id, error="forbidden"))
+        if project_id:
+            allowed = await supabase_admin.user_can_manage_project(user_id, project_id)
+            if not allowed:
+                return RedirectResponse(_frontend_return_url(project_id, error="forbidden"))
 
         access_token = await sentry_service.exchange_code_for_token(code)
-        await sentry_service.save_pending_authorization(state, project_id, user_id, access_token)
+        await sentry_service.save_pending_authorization(state, user_id, access_token, project_id)
         return RedirectResponse(_frontend_return_url(project_id, sentry_oauth=state))
     except SentryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -133,6 +145,21 @@ async def connect(request: SentryConnectRequest) -> SentryConnectResponse:
             request.state,
             request.org_slug,
             request.project_slug,
+        )
+        return SentryConnectResponse(**result, connected=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/attach", response_model=SentryConnectResponse)
+async def attach(request: SentryAttachRequest) -> SentryConnectResponse:
+    """Link a pre-project Sentry OAuth session to a newly created project."""
+
+    try:
+        result = await sentry_service.attach_pending_connection(
+            request.state,
+            request.project_id,
+            request.user_id,
         )
         return SentryConnectResponse(**result, connected=True)
     except ValueError as exc:

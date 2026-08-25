@@ -17,13 +17,16 @@ export type SentryConnectionStatus = {
   project_slug: string | null
   project_name: string | null
   connected_at: string | null
+  pendingAttach?: boolean
+  attachState?: string | null
 }
 
-export async function getSentryAuthorizeUrl(projectId: string, userId: string): Promise<string> {
+export async function getSentryAuthorizeUrl(userId: string, projectId?: string | null): Promise<string> {
   if (!isApiConfigured) {
     throw new Error('Backend URL is not configured.')
   }
-  const params = new URLSearchParams({ project_id: projectId, user_id: userId })
+  const params = new URLSearchParams({ user_id: userId })
+  if (projectId) params.set('project_id', projectId)
   const url = `${API_URL}/api/sentry/authorize?${params}`
   const res = await fetch(url)
   if (!res.ok) throw await readApiError(res, url)
@@ -64,6 +67,36 @@ export async function connectSentryProject(input: {
       state: input.state,
       org_slug: input.orgSlug,
       project_slug: input.projectSlug,
+    }),
+  })
+  if (!res.ok) throw await readApiError(res, url)
+  const body = await res.json()
+  return {
+    connected: true,
+    org_slug: body.org_slug,
+    org_name: body.org_name,
+    project_slug: body.project_slug,
+    project_name: body.project_name,
+    connected_at: new Date().toISOString(),
+    pendingAttach: Boolean(body.pending_attach),
+    attachState: body.pending_attach ? input.state : null,
+  }
+}
+
+export async function attachSentryToProject(input: {
+  state: string
+  projectId: string
+  userId: string
+}): Promise<SentryConnectionStatus> {
+  if (!isApiConfigured) throw new Error('Backend URL is not configured.')
+  const url = `${API_URL}/api/sentry/attach`
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      state: input.state,
+      project_id: input.projectId,
+      user_id: input.userId,
     }),
   })
   if (!res.ok) throw await readApiError(res, url)

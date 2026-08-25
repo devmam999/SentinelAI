@@ -12,12 +12,12 @@ import { formatApiError } from '../lib/formatApiError'
 type SentryAutonomousSetupProps = {
   projectId: string | null
   userId: string | null
-  enabled: boolean
-  workInProgress: boolean
+  active: boolean
   oauthState: string | null
   initialStatus: SentryConnectionStatus | null
   onStatusChange: (status: SentryConnectionStatus) => void
   onClearOAuthState: () => void
+  onChangeConnection?: () => void
 }
 
 function SentryMark({ size = 18 }: { size?: number }) {
@@ -39,15 +39,16 @@ function SentryMark({ size = 18 }: { size?: number }) {
 export default function SentryAutonomousSetup({
   projectId,
   userId,
-  enabled,
-  workInProgress,
+  active,
   oauthState,
   initialStatus,
   onStatusChange,
   onClearOAuthState,
+  onChangeConnection,
 }: SentryAutonomousSetupProps) {
   const [status, setStatus] = useState<SentryConnectionStatus | null>(initialStatus)
   const [connecting, setConnecting] = useState(false)
+  const [connectionHovered, setConnectionHovered] = useState(false)
   const [loadingOrgs, setLoadingOrgs] = useState(false)
   const [loadingProjects, setLoadingProjects] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -61,34 +62,33 @@ export default function SentryAutonomousSetup({
     setStatus(initialStatus)
   }, [initialStatus])
 
-  const disabled = workInProgress || !enabled
-  const showSelection = Boolean(oauthState && enabled && !workInProgress)
+  const showSelection = Boolean(oauthState && active)
   const connected = Boolean(status?.connected)
 
   useEffect(() => {
     if (!showSelection || !oauthState) return
-    let active = true
+    let alive = true
 
     async function loadOrganizations() {
       setLoadingOrgs(true)
       setError(null)
       try {
         const orgs = await fetchSentryOrganizations(oauthState!)
-        if (!active) return
+        if (!alive) return
         setOrganizations(orgs)
         if (orgs.length === 1) setSelectedOrg(orgs[0].slug)
       } catch (err) {
-        if (active) {
+        if (alive) {
           setError(err instanceof Error ? formatApiError(err.message) : 'Could not load Sentry organizations.')
         }
       } finally {
-        if (active) setLoadingOrgs(false)
+        if (alive) setLoadingOrgs(false)
       }
     }
 
     void loadOrganizations()
     return () => {
-      active = false
+      alive = false
     }
   }, [oauthState, showSelection])
 
@@ -98,35 +98,35 @@ export default function SentryAutonomousSetup({
       setSelectedProject('')
       return
     }
-    let active = true
+    let alive = true
 
     async function loadProjects() {
       setLoadingProjects(true)
       setError(null)
       try {
         const nextProjects = await fetchSentryProjects(oauthState!, selectedOrg)
-        if (!active) return
+        if (!alive) return
         setProjects(nextProjects)
         if (nextProjects.length === 1) setSelectedProject(nextProjects[0].slug)
       } catch (err) {
-        if (active) {
+        if (alive) {
           setError(err instanceof Error ? formatApiError(err.message) : 'Could not load Sentry projects.')
         }
       } finally {
-        if (active) setLoadingProjects(false)
+        if (alive) setLoadingProjects(false)
       }
     }
 
     void loadProjects()
     return () => {
-      active = false
+      alive = false
     }
   }, [oauthState, selectedOrg, showSelection])
 
   const handleConnect = async () => {
-    if (disabled) return
-    if (!projectId || !userId) {
-      setError('Create and save the project first, then connect Sentry from edit project.')
+    if (!active) return
+    if (!userId) {
+      setError('You must be signed in to connect Sentry.')
       return
     }
     if (!isApiConfigured) {
@@ -137,7 +137,7 @@ export default function SentryAutonomousSetup({
     setConnecting(true)
     setError(null)
     try {
-      const url = await getSentryAuthorizeUrl(projectId, userId)
+      const url = await getSentryAuthorizeUrl(userId, projectId)
       window.location.href = url
     } catch (err) {
       setError(err instanceof Error ? formatApiError(err.message) : 'Could not start Sentry authorization.')
@@ -164,6 +164,17 @@ export default function SentryAutonomousSetup({
       setSaving(false)
     }
   }
+
+  const handleChangeProject = async () => {
+    setError(null)
+    setSelectedOrg('')
+    setSelectedProject('')
+    onChangeConnection?.()
+    setStatus(null)
+    await handleConnect()
+  }
+
+  if (!active) return null
 
   return (
     <div
@@ -201,16 +212,56 @@ export default function SentryAutonomousSetup({
         </div>
       </div>
 
-      {connected && status && (
+      {connected && status && !showSelection && (
         <div
           style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
             marginBottom: 10,
-            fontFamily: 'var(--font-jetbrains)',
-            fontSize: '0.78rem',
-            color: 'var(--primary)',
+            maxWidth: '100%',
           }}
+          onMouseEnter={() => setConnectionHovered(true)}
+          onMouseLeave={() => setConnectionHovered(false)}
         >
-          Connected to {status.org_name ?? status.org_slug} / {status.project_name ?? status.project_slug}
+          <span
+            style={{
+              fontFamily: 'var(--font-jetbrains)',
+              fontSize: '0.78rem',
+              color: 'var(--primary)',
+            }}
+          >
+            Connected to {status.org_name ?? status.org_slug} / {status.project_name ?? status.project_slug}
+          </span>
+          {(connectionHovered || connecting) && (
+            <button
+              type="button"
+              disabled={connecting}
+              onClick={() => void handleChangeProject()}
+              style={{
+                fontFamily: 'var(--font-inter)',
+                fontSize: '0.72rem',
+                fontWeight: 600,
+                color: 'var(--muted-foreground)',
+                background: 'transparent',
+                border: 'none',
+                padding: 0,
+                cursor: connecting ? 'default' : 'pointer',
+                textDecoration: 'underline',
+                textUnderlineOffset: 3,
+                whiteSpace: 'nowrap',
+                opacity: connecting ? 0.7 : 1,
+              }}
+              onMouseEnter={(e) => {
+                if (!connecting) e.currentTarget.style.color = 'var(--foreground)'
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.color = 'var(--muted-foreground)'
+              }}
+            >
+              {connecting ? 'Redirecting…' : 'Change project'}
+            </button>
+          )}
         </div>
       )}
 
@@ -220,10 +271,10 @@ export default function SentryAutonomousSetup({
         </div>
       )}
 
-      {!showSelection && (
+      {!showSelection && !connected && (
         <button
           type="button"
-          disabled={disabled || connecting || !projectId}
+          disabled={connecting}
           onClick={() => void handleConnect()}
           style={{
             display: 'inline-flex',
@@ -232,33 +283,18 @@ export default function SentryAutonomousSetup({
             fontFamily: 'var(--font-inter)',
             fontWeight: 600,
             fontSize: '0.84rem',
-            color: disabled ? 'var(--muted-foreground)' : '#ffffff',
-            background: disabled ? 'rgba(255,255,255,0.06)' : '#6C5FC7',
-            border: '1px solid',
-            borderColor: disabled ? 'var(--border)' : '#6C5FC7',
+            color: '#ffffff',
+            background: '#6C5FC7',
+            border: '1px solid #6C5FC7',
             borderRadius: 6,
             padding: '9px 14px',
-            cursor: disabled ? 'not-allowed' : connecting ? 'default' : 'pointer',
+            cursor: connecting ? 'default' : 'pointer',
             opacity: connecting ? 0.7 : 1,
           }}
         >
           <SentryMark size={16} />
           {connecting ? 'Redirecting to Sentry…' : 'Authorize with Sentry'}
         </button>
-      )}
-
-      {!projectId && enabled && !workInProgress && (
-        <p
-          style={{
-            marginTop: 8,
-            marginBottom: 0,
-            fontFamily: 'var(--font-inter)',
-            fontSize: '0.78rem',
-            color: 'var(--muted-foreground)',
-          }}
-        >
-          Create the project first, then return here to connect Sentry.
-        </p>
       )}
 
       {showSelection && (

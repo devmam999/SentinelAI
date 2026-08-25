@@ -11,7 +11,10 @@ import {
   type ProjectRole,
   type ProjectSentryStatus,
 } from '../lib/projectTeam'
-import type { SentryConnectionStatus } from '../lib/sentry'
+import {
+  attachSentryToProject,
+  type SentryConnectionStatus,
+} from '../lib/sentry'
 import SentryAutonomousSetup from '../components/SentryAutonomousSetup'
 import * as s from '../components/authStyles'
 
@@ -24,15 +27,10 @@ const RUNBOOK_REQUIRED_SECTIONS = [
 
 type TriggerMode = 'manual' | 'autonomous'
 
-/** Autonomous detection is not shipped yet — keep disabled in the UI. */
-const AUTONOMOUS_TRIGGER_ENABLED = false
-
 const TRIGGER_MODE_OPTIONS: {
   value: TriggerMode
   title: string
   description: string
-  disabled?: boolean
-  disabledNote?: string
 }[] = [
   {
     value: 'manual',
@@ -44,8 +42,6 @@ const TRIGGER_MODE_OPTIONS: {
     title: 'Autonomous agent',
     description:
       'SentinelAI listens for production issues through Sentry and automatically starts incident analysis.',
-    disabled: !AUTONOMOUS_TRIGGER_ENABLED,
-    disabledNote: 'Autonomous mode is currently a work in progress.',
   },
 ]
 
@@ -70,9 +66,13 @@ export default function AddProject() {
   const [existingRunbooks, setExistingRunbooks] = useState<string[]>([])
   // Newly selected files to upload on save.
   const [files, setFiles] = useState<File[]>([])
-  const [triggerMode, setTriggerMode] = useState<TriggerMode>('manual')
+  const initialSentryOAuth = searchParams.get('sentry_oauth')
+  const [triggerMode, setTriggerMode] = useState<TriggerMode>(() =>
+    initialSentryOAuth ? 'autonomous' : 'manual',
+  )
   const [sentryStatus, setSentryStatus] = useState<SentryConnectionStatus | null>(null)
-  const [sentryOAuthState, setSentryOAuthState] = useState<string | null>(null)
+  const [sentryOAuthState, setSentryOAuthState] = useState<string | null>(initialSentryOAuth)
+  const [sentryAttachState, setSentryAttachState] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [githubFieldError, setGithubFieldError] = useState<string | null>(null)
   const [slackFieldError, setSlackFieldError] = useState<string | null>(null)
@@ -94,7 +94,7 @@ export default function AddProject() {
     const sentryError = searchParams.get('sentry_error')
     if (oauth) {
       setSentryOAuthState(oauth)
-      if (AUTONOMOUS_TRIGGER_ENABLED) setTriggerMode('autonomous')
+      setTriggerMode('autonomous')
     }
     if (sentryError) {
       setError(
@@ -148,7 +148,10 @@ export default function AddProject() {
             .filter(Boolean),
         )
         const savedMode = data.trigger_mode === 'autonomous' ? 'autonomous' : 'manual'
-        setTriggerMode(AUTONOMOUS_TRIGGER_ENABLED ? savedMode : 'manual')
+        setTriggerMode((current) => {
+          if (current === 'autonomous' || sentryOAuthState) return 'autonomous'
+          return savedMode
+        })
         const sentry = await fetchProjectSentryStatus(id!)
         setSentryStatus(toSentryConnectionStatus(sentry))
       }
@@ -227,6 +230,7 @@ export default function AddProject() {
   }
 
   const hasValidRunbook = existingRunbooks.length + files.length > 0
+  const autonomousNeedsSentry = triggerMode === 'autonomous' && !sentryStatus?.connected
 
   const removeExisting = (index: number) => setExistingRunbooks((prev) => prev.filter((_, i) => i !== index))
   const removeFile = (index: number) => {
@@ -327,8 +331,8 @@ export default function AddProject() {
       setError('Please upload at least one runbook (.md or .pdf).')
       return
     }
-    if (triggerMode === 'autonomous' && AUTONOMOUS_TRIGGER_ENABLED && !sentryStatus?.connected && !sentryOAuthState) {
-      setError('Connect Sentry and select an organization and project before enabling autonomous mode.')
+    if (autonomousNeedsSentry) {
+      setError('Connect Sentry and select an organization and project before creating an autonomous project.')
       return
     }
 
@@ -389,8 +393,7 @@ export default function AddProject() {
     }
 
     const runbookPaths = [...existingRunbooks, ...uploadedPaths]
-    const resolvedTriggerMode: TriggerMode =
-      AUTONOMOUS_TRIGGER_ENABLED && triggerMode === 'autonomous' ? 'autonomous' : 'manual'
+    const resolvedTriggerMode: TriggerMode = triggerMode === 'autonomous' ? 'autonomous' : 'manual'
     const payload = {
       name: name.trim(),
       github_repo: githubRepo.trim() || null,
@@ -399,18 +402,51 @@ export default function AddProject() {
       trigger_mode: resolvedTriggerMode,
     }
 
-    const { error } = isEditing
-      ? await supabase
-          .from('projects')
-          .update({ ...payload, updated_at: new Date().toISOString() })
-          .eq('id', id)
-      : await supabase.from('projects').insert({ user_id: user.id, ...payload })
-    setSaving(false)
-
-    if (error) {
-      setError(error.message)
+    if (isEditing) {
+      const { error: updateError } = await supabase
+        .from('projects')
+        .update({ ...payload, updated_at: new Date().toISOString() })
+        .eq('id', id)
+      setSaving(false)
+      if (updateError) {
+        setError(updateError.message)
+        return
+      }
+      navigate('/dashboard')
       return
     }
+
+    const { data: created, error: insertError } = await supabase
+      .from('projects')
+      .insert({ user_id: user.id, ...payload })
+      .select('id')
+      .single()
+
+    if (insertError) {
+      setSaving(false)
+      setError(insertError.message)
+      return
+    }
+
+    if (resolvedTriggerMode === 'autonomous' && sentryAttachState && created?.id) {
+      try {
+        await attachSentryToProject({
+          state: sentryAttachState,
+          projectId: created.id,
+          userId: user.id,
+        })
+      } catch (err) {
+        setSaving(false)
+        setError(
+          err instanceof Error
+            ? formatApiError(err.message)
+            : 'Project was created but Sentry could not be linked. Edit the project to connect Sentry.',
+        )
+        return
+      }
+    }
+
+    setSaving(false)
     navigate('/dashboard')
   }
 
@@ -874,7 +910,6 @@ export default function AddProject() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {TRIGGER_MODE_OPTIONS.map((option) => {
                 const selected = triggerMode === option.value
-                const disabled = Boolean(option.disabled)
                 const isAutonomous = option.value === 'autonomous'
                 return (
                   <div
@@ -884,7 +919,6 @@ export default function AddProject() {
                       borderRadius: 8,
                       border: `1px solid ${selected ? 'rgba(0,214,143,0.45)' : 'var(--border)'}`,
                       background: selected ? 'rgba(0,214,143,0.06)' : 'var(--card)',
-                      opacity: disabled ? 0.72 : 1,
                     }}
                   >
                     <label
@@ -892,7 +926,7 @@ export default function AddProject() {
                         display: 'flex',
                         alignItems: 'flex-start',
                         gap: 12,
-                        cursor: disabled ? 'not-allowed' : 'pointer',
+                        cursor: 'pointer',
                       }}
                     >
                       <input
@@ -900,9 +934,11 @@ export default function AddProject() {
                         name="trigger-mode"
                         value={option.value}
                         checked={selected}
-                        disabled={disabled}
                         onChange={() => {
-                          if (!disabled) setTriggerMode(option.value)
+                          setTriggerMode(option.value)
+                          if (option.value === 'manual') {
+                            setSentryAttachState(null)
+                          }
                         }}
                         style={{
                           marginTop: 3,
@@ -910,7 +946,7 @@ export default function AddProject() {
                           height: 16,
                           accentColor: 'var(--primary)',
                           flexShrink: 0,
-                          cursor: disabled ? 'not-allowed' : 'pointer',
+                          cursor: 'pointer',
                         }}
                       />
                       <span style={{ flex: 1, minWidth: 0 }}>
@@ -937,21 +973,6 @@ export default function AddProject() {
                         >
                           {option.description}
                         </span>
-                        {option.disabledNote && (
-                          <span
-                            style={{
-                              display: 'block',
-                              marginTop: 8,
-                              fontFamily: 'var(--font-inter)',
-                              fontSize: '0.78rem',
-                              fontWeight: 600,
-                              color: 'rgba(240,192,64,0.95)',
-                              lineHeight: 1.4,
-                            }}
-                          >
-                            {option.disabledNote}
-                          </span>
-                        )}
                       </span>
                     </label>
 
@@ -959,24 +980,53 @@ export default function AddProject() {
                       <SentryAutonomousSetup
                         projectId={id ?? null}
                         userId={user?.id ?? null}
-                        enabled={selected && AUTONOMOUS_TRIGGER_ENABLED}
-                        workInProgress={!AUTONOMOUS_TRIGGER_ENABLED}
+                        active={triggerMode === 'autonomous'}
                         oauthState={sentryOAuthState}
                         initialStatus={sentryStatus}
-                        onStatusChange={setSentryStatus}
+                        onStatusChange={(status) => {
+                          setTriggerMode('autonomous')
+                          setSentryStatus(status)
+                          if (status.pendingAttach && status.attachState) {
+                            setSentryAttachState(status.attachState)
+                          }
+                        }}
                         onClearOAuthState={() => setSentryOAuthState(null)}
+                        onChangeConnection={() => {
+                          setSentryStatus(null)
+                          setSentryAttachState(null)
+                        }}
                       />
                     )}
                   </div>
                 )
               })}
             </div>
+            {autonomousNeedsSentry && (
+              <p
+                style={{
+                  marginTop: 10,
+                  marginBottom: 0,
+                  fontFamily: 'var(--font-inter)',
+                  fontSize: '0.78rem',
+                  color: 'rgba(240,192,64,0.95)',
+                  lineHeight: 1.45,
+                }}
+              >
+                Autonomous projects require a connected Sentry organization and project before you can save.
+              </p>
+            )}
           </fieldset>
 
           <div style={{ display: 'flex', gap: 10 }}>
             <button
               type="submit"
-              disabled={saving || validatingRunbooks || validatingIntegrations || !hasValidRunbook}
+              disabled={
+                saving ||
+                validatingRunbooks ||
+                validatingIntegrations ||
+                !hasValidRunbook ||
+                autonomousNeedsSentry
+              }
               style={{
                 ...s.primaryButton,
                 width: 'auto',

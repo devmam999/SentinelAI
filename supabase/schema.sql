@@ -2502,3 +2502,16 @@ end;
 $$;
 
 grant execute on function public.get_project_sentry_status(uuid) to authenticated;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 15. Sentry OAuth before project creation (nullable project_id + draft fields)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+alter table public.sentry_oauth_pending
+  alter column project_id drop not null;
+
+alter table public.sentry_oauth_pending
+  add column if not exists org_slug text,
+  add column if not exists org_name text,
+  add column if not exists project_slug text,
+  add column if not exists project_name text;

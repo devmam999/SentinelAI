@@ -39,30 +39,33 @@ def _require_oauth_config() -> tuple[str, str, str]:
     return settings.sentry_client_id, settings.sentry_client_secret, redirect_uri
 
 
-def build_oauth_state(project_id: str, user_id: str) -> str:
-    payload = {
-        "project_id": project_id,
+def build_oauth_state(user_id: str, project_id: str | None = None) -> str:
+    payload: dict[str, str] = {
         "user_id": user_id,
         "nonce": secrets.token_urlsafe(16),
     }
+    if project_id:
+        payload["project_id"] = project_id
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def parse_oauth_state(state: str) -> dict[str, str]:
+def parse_oauth_state(state: str) -> dict[str, str | None]:
     padded = state + "=" * (-len(state) % 4)
     raw = base64.urlsafe_b64decode(padded.encode("ascii"))
     data = json.loads(raw.decode("utf-8"))
-    project_id = data.get("project_id")
     user_id = data.get("user_id")
-    if not project_id or not user_id:
+    if not user_id:
         raise ValueError("Invalid OAuth state.")
-    return {"project_id": project_id, "user_id": user_id}
+    return {
+        "project_id": data.get("project_id") or None,
+        "user_id": user_id,
+    }
 
 
-def build_authorization_url(project_id: str, user_id: str) -> tuple[str, str]:
+def build_authorization_url(user_id: str, project_id: str | None = None) -> tuple[str, str]:
     client_id, _, redirect_uri = _require_oauth_config()
-    state = build_oauth_state(project_id, user_id)
+    state = build_oauth_state(user_id, project_id)
     params = urlencode(
         {
             "response_type": "code",
@@ -117,15 +120,20 @@ async def list_projects(access_token: str, org_slug: str) -> list[dict[str, str]
     return [{"slug": proj["slug"], "name": proj.get("name") or proj["slug"]} for proj in data]
 
 
-async def save_pending_authorization(state: str, project_id: str, user_id: str, access_token: str) -> None:
-    await supabase_admin.upsert_sentry_pending(
-        {
-            "state": state,
-            "project_id": project_id,
-            "user_id": user_id,
-            "access_token": access_token,
-        }
-    )
+async def save_pending_authorization(
+    state: str,
+    user_id: str,
+    access_token: str,
+    project_id: str | None = None,
+) -> None:
+    row: dict[str, Any] = {
+        "state": state,
+        "user_id": user_id,
+        "access_token": access_token,
+    }
+    if project_id:
+        row["project_id"] = project_id
+    await supabase_admin.upsert_sentry_pending(row)
 
 
 async def load_pending_authorization(state: str) -> dict[str, Any]:
@@ -144,10 +152,10 @@ async def load_pending_authorization(state: str) -> dict[str, Any]:
     return row
 
 
-async def complete_connection(state: str, org_slug: str, project_slug: str) -> dict[str, str]:
+async def complete_connection(state: str, org_slug: str, project_slug: str) -> dict[str, str | bool]:
     pending = await load_pending_authorization(state)
     access_token = pending["access_token"]
-    project_id = pending["project_id"]
+    project_id = pending.get("project_id")
 
     orgs = await list_organizations(access_token)
     org = next((item for item in orgs if item["slug"] == org_slug), None)
@@ -158,6 +166,27 @@ async def complete_connection(state: str, org_slug: str, project_slug: str) -> d
     project = next((item for item in projects if item["slug"] == project_slug), None)
     if not project:
         raise ValueError("Selected Sentry project was not found for this organization.")
+
+    result = {
+        "org_slug": org_slug,
+        "org_name": org["name"],
+        "project_slug": project_slug,
+        "project_name": project["name"],
+        "pending_attach": False,
+    }
+
+    if not project_id:
+        await supabase_admin.update_sentry_pending(
+            state,
+            {
+                "org_slug": org_slug,
+                "org_name": org["name"],
+                "project_slug": project_slug,
+                "project_name": project["name"],
+            },
+        )
+        result["pending_attach"] = True
+        return result
 
     await supabase_admin.upsert_sentry_connection(
         {
@@ -171,10 +200,42 @@ async def complete_connection(state: str, org_slug: str, project_slug: str) -> d
         }
     )
     await supabase_admin.delete_sentry_pending(state)
+    return result
+
+
+async def attach_pending_connection(state: str, project_id: str, user_id: str) -> dict[str, str]:
+    pending = await load_pending_authorization(state)
+    if pending.get("project_id"):
+        raise ValueError("This Sentry session is already linked to a project.")
+
+    if pending.get("user_id") != user_id:
+        raise ValueError("You do not have permission to attach this Sentry connection.")
+
+    org_slug = pending.get("org_slug")
+    project_slug = pending.get("project_slug")
+    if not org_slug or not project_slug:
+        raise ValueError("Select a Sentry organization and project before creating the project.")
+
+    allowed = await supabase_admin.user_can_manage_project(user_id, project_id)
+    if not allowed:
+        raise ValueError("You do not have permission to connect Sentry for this project.")
+
+    await supabase_admin.upsert_sentry_connection(
+        {
+            "project_id": project_id,
+            "access_token": pending["access_token"],
+            "org_slug": org_slug,
+            "org_name": pending.get("org_name") or org_slug,
+            "project_slug": project_slug,
+            "project_name": pending.get("project_name") or project_slug,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    await supabase_admin.delete_sentry_pending(state)
 
     return {
         "org_slug": org_slug,
-        "org_name": org["name"],
+        "org_name": pending.get("org_name") or org_slug,
         "project_slug": project_slug,
-        "project_name": project["name"],
+        "project_name": pending.get("project_name") or project_slug,
     }

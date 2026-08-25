@@ -83,6 +83,18 @@ async def get_sentry_pending(state: str) -> dict[str, Any] | None:
         return rows[0] if rows else None
 
 
+async def update_sentry_pending(state: str, fields: dict[str, Any]) -> None:
+    base, key = _require_admin_config()
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.patch(
+            f"{base}/rest/v1/sentry_oauth_pending",
+            params={"state": f"eq.{state}"},
+            headers=_headers(key),
+            json=fields,
+        )
+        resp.raise_for_status()
+
+
 async def delete_sentry_pending(state: str) -> None:
     base, key = _require_admin_config()
     async with httpx.AsyncClient(timeout=15) as client:

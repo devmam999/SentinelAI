@@ -206,3 +206,10 @@ class SentryConnectResponse(BaseModel):
     org_name: str
     project_slug: str
     project_name: str
+    pending_attach: bool = False
+
+
+class SentryAttachRequest(BaseModel):
+    state: str
+    project_id: str
+    user_id: str
