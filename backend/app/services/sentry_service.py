@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
+import logging
 import secrets
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +16,8 @@ import httpx
 
 from ..config import get_settings
 from . import supabase_admin
+
+logger = logging.getLogger(__name__)
 
 SENTRY_AUTH_URL = "https://sentry.io/oauth/authorize/"
 SENTRY_TOKEN_URL = "https://sentry.io/oauth/token/"
@@ -239,3 +244,22 @@ async def attach_pending_connection(state: str, project_id: str, user_id: str) -
         "project_slug": project_slug,
         "project_name": pending.get("project_name") or project_slug,
     }
+
+
+def verify_webhook_signature(raw_body: bytes, signature: str | None) -> bool:
+    """Verify Sentry-Hook-Signature using the integration client secret."""
+
+    settings = get_settings()
+    secret = settings.sentry_webhook_secret or settings.sentry_client_secret
+    if not secret:
+        logger.warning("Sentry webhook received but no webhook secret is configured.")
+        return False
+    if not signature:
+        return False
+
+    expected = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+def parse_webhook_json(raw_body: bytes) -> dict[str, Any]:
+    return json.loads(raw_body.decode("utf-8"))

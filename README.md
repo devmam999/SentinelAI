@@ -26,23 +26,47 @@ Next Steps:            Rollback deployment, Restart auth service
 
 ## How it works
 
+SentinelAI supports two **incident trigger modes** per project:
+
+| Mode | How an incident starts | Who triggers analysis |
+| ---- | ------------------------ | --------------------- |
+| **Manual trigger** (default) | Owner/admin describes an alert in the UI | Human clicks **Analyze Incident** |
+| **Autonomous** | Sentry reports a **new issue** via webhook | Backend receives webhook → runs pipeline automatically |
+
+Both modes use the **same analysis pipeline** (GitHub → Chroma runbooks → Gemini → optional Slack). Only the **entry point** differs.
+
+### Manual trigger — high-level flow
+
 ```
-Alert ─▶ FastAPI backend
-             │
-             ├─▶ GitHub API      → recent commits + deployments (listed in prompt — not vector search)
-             ├─▶ ChromaDB        → vector search over runbooks only (Gemini embeddings)
-             ├─▶ Gemini Flash    → picks likely bad commit + remediation from combined context
-             └─▶ Slack Webhook   → formatted incident report in your channel
+Owner/admin describes alert ─▶ FastAPI backend
+                                    │
+                                    ├─▶ GitHub API      → recent commits + deployments
+                                    ├─▶ ChromaDB        → vector search over runbooks
+                                    ├─▶ Gemini Flash    → structured incident analysis
+                                    └─▶ Slack Webhook   → formatted incident report
+                                        │
+                                        └─▶ Incident saved in Supabase (frontend)
+```
+
+### Autonomous trigger — high-level flow
+
+```
+Sentry new issue ─▶ POST /api/sentry/webhook (backend)
+                         │
+                         ├─▶ Match SentinelAI project (Sentry org/project link)
+                         ├─▶ GitHub API + ChromaDB + Gemini (same pipeline)
+                         ├─▶ Slack Webhook (optional)
+                         └─▶ Incident saved in Supabase (service role, source=sentry)
 ```
 
 The **frontend** (React) lets users sign up with a username, create and join
 projects (GitHub repo, Slack webhook, runbooks — **validated against GitHub and
-Slack before save**), collaborate via **roles and invitations**, manage account
+Slack before save**), connect **Sentry** for autonomous mode, collaborate via **roles and invitations**, manage account
 settings, and run **owner/admin-controlled incident workflows** with assignment
 and fix approval. **Supabase** handles authentication, profiles,
 projects, team membership, invitations, persisted incidents, and runbook
-storage. The **backend** (FastAPI, Docker) runs the AI incident pipeline and
-persists ChromaDB vectors on a dedicated volume.
+storage. The **backend** (FastAPI, Docker) runs the AI incident pipeline,
+Sentry OAuth/webhooks, and persists ChromaDB vectors on a dedicated volume.
 
 **Recommended production layout:** frontend on **Vercel**, backend on **Render**
 (or any Docker host with a persistent volume). The backend is not a good fit for
@@ -73,7 +97,9 @@ In SentinelAI, **RAG applies to runbooks only.** Commits and deployments are
 **not** embedded or vector-searched — they are fetched from the **GitHub REST
 API** and passed to Gemini Flash as a plain list for the model to reason over.
 
-The pipeline lives in `backend/app/services/incident_service.py`:
+The pipeline lives in `backend/app/services/incident_service.py` and is shared by **manual** and **autonomous** triggers:
+
+#### Shared analysis pipeline (manual + autonomous)
 
 ```mermaid
 flowchart TB
@@ -84,7 +110,7 @@ flowchart TB
   end
 
   subgraph incident [2–4. At incident time]
-    ALERT[Alert text] --> VSEARCH["Vector search (top 3 runbooks)"]
+    ALERT[Alert text — manual input or Sentry issue] --> VSEARCH["Vector search (top 3 runbooks)"]
     CHROMA --> VSEARCH
 
     GH["GitHub REST API"] --> RECENT["Recent commits (up to 30) + deployments (up to 5)"]
@@ -93,6 +119,7 @@ flowchart TB
     RECENT --> PROMPT
     PROMPT --> GEN["Gemini Flash → IncidentAnalysis JSON"]
     GEN --> SLACK[Slack report]
+    GEN --> SAVE[(Supabase incident)]
   end
 ```
 
@@ -275,6 +302,11 @@ database**, and **runbook file storage**.
    | **10** | **Incident assignment workflow** — `assigned_to` on incidents, `incident_assignment_requests`, admin-only incident creation, assign / request / review RPCs (see [Incidents & fixes](#incidents--fixes)) |
    | **11** | **Fix review feedback** — `review_incident_fix` requires feedback when declining / requesting changes |
    | **12** | **Postmortem metadata** — `runbook_matches`, `postmortem_posted`, `assigned_at`, `mark_postmortem_posted` RPC |
+   | **13** | **`trigger_mode`** on projects (`manual` \| `autonomous`) |
+   | **14** | **Sentry connections** — `project_sentry_connections`, `sentry_oauth_pending`, `get_project_sentry_status` |
+   | **15** | **Pre-project Sentry OAuth** — nullable `project_id` on pending OAuth rows |
+   | **16** | **`trigger_mode` in `get_accessible_project`** (drop + recreate RPC) |
+   | **17** | **Sentry incidents** — `incidents.source`, `incidents.sentry_issue_id`, dedup index |
    | RPCs | Auth: `resolve_login_email`, `is_username_available`, `update_username`, `delete_own_account` |
    | | Teams: `invite_project_member`, `accept_project_invitation`, `get_my_pending_invitations`, `transfer_project_ownership`, `leave_project`, … |
    | | Access: **`get_my_projects()`**, **`get_accessible_project(uuid)`**, `get_my_project_role(uuid)` |
@@ -405,16 +437,18 @@ Each project has three roles. The dashboard lists projects you **own** and proje
 
 **Incidents & fixes**
 
-Only **owners and admins** can describe an alert and run **Analyze Incident** (the RAG pipeline: GitHub commits → Chroma runbook search → Gemini → optional Slack). Regular **users** cannot trigger analysis — this prevents low-privilege members from injecting arbitrary alert text into the pipeline.
+Only **owners and admins** can describe an alert and run **Analyze Incident** on **manual-trigger** projects (the RAG pipeline: GitHub commits → Chroma runbook search → Gemini → optional Slack). Regular **users** cannot trigger analysis — this prevents low-privilege members from injecting arbitrary alert text into the pipeline.
 
-**Incident workflow**
+**Autonomous** projects do not use the manual report form. Sentry **issue.created** webhooks hit `POST /api/sentry/webhook`; the backend runs the same pipeline and saves incidents with `source = sentry`.
+
+#### Manual incident workflow
 
 ```mermaid
 flowchart TB
   subgraph report [Report — Owner / Admin only]
     ALERT[Describe alert] --> ANALYZE[Analyze Incident]
     ANALYZE --> RAG[GitHub + Chroma + Gemini]
-    RAG --> SAVE[(Saved incident — active)]
+    RAG --> SAVE[(Saved incident — active, source=manual)]
   end
 
   subgraph assign [Assignment]
@@ -438,6 +472,86 @@ flowchart TB
     RESOLVED --> POSTMORTEM[Postmortem posted to Slack]
   end
 ```
+
+#### Autonomous incident workflow
+
+```mermaid
+flowchart TB
+  subgraph ingest [Ingest — Sentry webhook]
+    SENTRY[Sentry new issue] --> WH[POST /api/sentry/webhook]
+    WH --> MATCH[Match project by Sentry project slug]
+    MATCH --> DEDUP{Already ingested?}
+    DEDUP -->|Yes| SKIP[Ignore duplicate]
+    DEDUP -->|No| RAG[GitHub + Chroma + Gemini]
+    RAG --> SAVE[(Saved incident — active, source=sentry)]
+    RAG --> SLACK[Slack alert optional]
+  end
+
+  subgraph after [Same as manual after creation]
+    SAVE --> VIEW[Team views / assigns / fixes]
+    VIEW --> RESOLVED[(Incident resolved)]
+    RESOLVED --> POSTMORTEM[Postmortem posted to Slack]
+  end
+```
+
+**Sentry setup for autonomous projects**
+
+SentinelAI needs **two separate Sentry configurations**. They live in different places in Sentry and use different env vars.
+
+| Purpose | Where in Sentry | Env vars |
+| ------- | --------------- | -------- |
+| Users click **Connect Sentry** in SentinelAI | **Developer Settings → OAuth Applications** | `SENTRY_CLIENT_ID`, `SENTRY_CLIENT_SECRET`, `SENTRY_REDIRECT_URI` |
+| Sentry sends new-issue webhooks to SentinelAI | **Custom Integrations** (Internal Integration) | `SENTRY_WEBHOOK_SECRET` |
+
+**OAuth Applications** (sidebar under Developer Settings) is **not** where webhooks are configured. If you only see Organization Tokens, Personal Tokens, and OAuth Applications, you are in the wrong place for `SENTRY_WEBHOOK_SECRET`.
+
+---
+
+#### A) OAuth Application — `SENTRY_CLIENT_ID` / `SENTRY_CLIENT_SECRET`
+
+1. [sentry.io](https://sentry.io) → **Settings** (organization gear icon)
+2. Left sidebar → **Developer Settings** → **OAuth Applications**
+3. Open your app (or create one)
+4. Set **Authorization callback URL** to `http://localhost:8000/api/sentry/callback` (production: your Render URL + `/api/sentry/callback`)
+5. Copy **Client ID** → `SENTRY_CLIENT_ID`
+6. Copy **Client Secret** → `SENTRY_CLIENT_SECRET`
+
+---
+
+#### B) Internal Integration — `SENTRY_WEBHOOK_SECRET`
+
+Per [Sentry’s docs](https://docs.sentry.io/api/guides/create-auth-token/#create-an-internal-integration), Internal Integrations are under **Custom Integrations**, not OAuth Applications.
+
+1. [sentry.io](https://sentry.io) → **Settings** (organization, not your user profile)
+2. Left sidebar → **Custom Integrations**
+3. Click **Create New Integration**
+4. Select **Internal Integration** → **Next**
+5. Configure:
+   - **Name:** `SentinelAI Webhooks` (any name is fine)
+   - **Webhook URL:** your public backend URL + `/api/sentry/webhook`
+     - Production: `https://your-backend.onrender.com/api/sentry/webhook`
+     - Local: Sentry cannot call `localhost` — expose port 8000 with [ngrok](https://ngrok.com) (e.g. `https://abc123.ngrok-free.app/api/sentry/webhook`)
+   - **Permissions → Issue & Event:** Read
+   - **Webhooks:** enable **Issue**
+6. Click **Save Changes**
+7. Scroll to **Credentials** at the bottom of the integration page
+8. Copy **Client Secret** → `SENTRY_WEBHOOK_SECRET` in `backend/.env.local`
+
+**Important:** Sentry may show the Client Secret **only once** when the integration is first created. Copy it immediately. If you lose it, reopen the integration → **Credentials** → regenerate the secret.
+
+**Direct link (replace `YOUR-ORG-SLUG`):**
+
+```text
+https://sentry.io/settings/YOUR-ORG-SLUG/developer-settings/new-internal/
+```
+
+Your org slug is the segment in your Sentry URL, e.g. `https://YOUR-ORG-SLUG.sentry.io/...`.
+
+**Verify it works:** after saving, Sentry sends an `installation` webhook to your URL. Check backend logs for `POST /api/sentry/webhook`. Then trigger a **brand-new** Sentry issue in the connected project.
+
+The webhook signature is verified with HMAC-SHA256 (`Sentry-Hook-Signature` header) using `SENTRY_WEBHOOK_SECRET`.
+
+**Incident workflow** (assignment, fixes, postmortems — both modes):
 
 **Postmortem on resolve**
 
@@ -545,6 +659,13 @@ consistent everywhere. Indexed runbooks persist in the **`chroma-data`** volume.
    GITHUB_TOKEN=your-github-pat
    SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ   # optional fallback
    FRONTEND_URL=http://localhost:8443                               # production: your Vercel URL
+   # Autonomous mode — see backend/.env.example for full Sentry setup steps:
+   SENTRY_CLIENT_ID=your_oauth_client_id          # OAuth Applications
+   SENTRY_CLIENT_SECRET=your_oauth_client_secret  # OAuth Applications
+   SENTRY_REDIRECT_URI=http://localhost:8000/api/sentry/callback
+   SENTRY_WEBHOOK_SECRET=your_internal_integration_client_secret  # Custom Integrations → Credentials
+   SUPABASE_URL=https://your-project.supabase.co
+   SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
    # Optional Gemini model overrides (defaults shown):
    # GEMINI_EMBEDDING_MODEL=gemini-embedding-001   # runbook vectors + validation
    # GEMINI_MODEL=gemini-2.5-flash                 # incident analysis
@@ -571,7 +692,7 @@ docker compose down -v           # stop and wipe indexed runbooks
 | Service | Role | Required env |
 | ------- | ---- | -------------- |
 | **Vercel** | Frontend SPA | `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`, **`VITE_API_URL`** (Render backend URL) |
-| **Render** | Backend Docker | `GEMINI_API_KEY`, `GITHUB_TOKEN`, **`FRONTEND_URL`** (Vercel URL, no trailing slash) |
+| **Render** | Backend Docker | `GEMINI_API_KEY`, `GITHUB_TOKEN`, **`FRONTEND_URL`** (Vercel URL, no trailing slash), **`SENTRY_*`** (autonomous), **`SUPABASE_URL`**, **`SUPABASE_SERVICE_ROLE_KEY`** |
 | **Supabase** | Auth + DB + storage | Run `schema.sql`; configure auth URLs (below) |
 
 ### Supabase auth URLs (fixes email verification on production)
@@ -631,6 +752,8 @@ to apply the deferred-profile triggers and remove any old unconfirmed profile ro
    so indexed runbooks survive restarts.
 2. Set **`FRONTEND_URL=https://your-app.vercel.app`** for CORS (regex also allows
    `https://*.vercel.app` previews).
+3. Set **`SENTRY_*`**, **`SUPABASE_URL`**, and **`SUPABASE_SERVICE_ROLE_KEY`** for autonomous mode.
+4. In Sentry → **Custom Integrations**, create an Internal Integration with webhook URL `https://your-backend.onrender.com/api/sentry/webhook` and copy **Client Secret** to `SENTRY_WEBHOOK_SECRET`.
 
 ### What breaks if misconfigured
 
@@ -645,6 +768,7 @@ to apply the deferred-profile triggers and remove any old unconfirmed profile ro
 | **Create project blocked** — GitHub error | Repo URL wrong, repo missing, or private repo without `GITHUB_TOKEN` on the backend |
 | **Create project blocked** — Slack error | Webhook disabled/revoked/wrong URL; regenerate at [api.slack.com/apps](https://api.slack.com/apps) |
 | Invitee dashboard empty / wrong Owner role | Re-run full [`supabase/schema.sql`](supabase/schema.sql), especially **section 9** (RLS + `get_my_projects` / `get_accessible_project`) |
+| Sentry error but no incident in SentinelAI | No Internal Integration in **Custom Integrations**; webhook URL unreachable; missing `SENTRY_WEBHOOK_SECRET`; project not **Autonomous**; run **section 17**; check Render logs for `/api/sentry/webhook` |
 
 ---
 

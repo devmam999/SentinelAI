@@ -2515,3 +2515,64 @@ alter table public.sentry_oauth_pending
   add column if not exists org_name text,
   add column if not exists project_slug text,
   add column if not exists project_name text;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 16. Expose trigger_mode on accessible project RPC
+-- ─────────────────────────────────────────────────────────────────────────────
+
+drop function if exists public.get_accessible_project(uuid);
+
+create function public.get_accessible_project(p_project_id uuid)
+returns table (
+  id uuid,
+  name text,
+  github_repo text,
+  slack_webhook text,
+  runbooks text,
+  created_at timestamptz,
+  user_id uuid,
+  trigger_mode text,
+  my_role text
+)
+language sql
+security definer
+set search_path = ''
+stable
+as $$
+  select
+    p.id,
+    p.name,
+    p.github_repo,
+    p.slack_webhook,
+    p.runbooks,
+    p.created_at,
+    p.user_id,
+    p.trigger_mode,
+    case
+      when p.user_id = (select auth.uid()) then 'owner'
+      else pm.role
+    end as my_role
+  from public.projects p
+  left join public.project_members pm
+    on pm.project_id = p.id and pm.user_id = (select auth.uid())
+  where p.id = p_project_id
+    and (
+      p.user_id = (select auth.uid())
+      or pm.user_id is not null
+    );
+$$;
+
+grant execute on function public.get_accessible_project(uuid) to authenticated;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 17. Sentry-sourced incidents (autonomous ingestion)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+alter table public.incidents
+  add column if not exists source text not null default 'manual'
+    check (source in ('manual', 'sentry')),
+  add column if not exists sentry_issue_id text;
+
+create unique index if not exists incidents_project_sentry_issue_idx
+  on public.incidents (project_id, sentry_issue_id)
+  where sentry_issue_id is not null;

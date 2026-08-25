@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     sentry_client_id: str | None = None
     sentry_client_secret: str | None = None
     sentry_redirect_uri: str | None = None
+    # Internal Integration client secret (webhook signing). Falls back to sentry_client_secret.
+    sentry_webhook_secret: str | None = None
 
     # --- Supabase admin (server-side Sentry token storage) ---
     supabase_url: str | None = None

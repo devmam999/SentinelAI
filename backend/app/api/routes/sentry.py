@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+import json
+
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 
 from ...config import get_settings
@@ -15,7 +17,7 @@ from ...models.schemas import (
     SentryProject,
     SentryProjectListResponse,
 )
-from ...services import sentry_service, supabase_admin
+from ...services import sentry_ingestion_service, sentry_service, supabase_admin
 from ...services.sentry_service import SentryNotConfiguredError
 
 router = APIRouter(prefix="/api/sentry", tags=["sentry"])
@@ -164,3 +166,28 @@ async def attach(request: SentryAttachRequest) -> SentryConnectResponse:
         return SentryConnectResponse(**result, connected=True)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/webhook")
+async def webhook(request: Request) -> dict:
+    """Receive Sentry Internal Integration webhooks and open autonomous incidents."""
+
+    raw_body = await request.body()
+    resource = request.headers.get("sentry-hook-resource", "")
+    signature = request.headers.get("sentry-hook-signature")
+
+    if not sentry_service.verify_webhook_signature(raw_body, signature):
+        raise HTTPException(status_code=401, detail="Invalid Sentry webhook signature.")
+
+    try:
+        payload = sentry_service.parse_webhook_json(raw_body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+
+    if resource == "installation":
+        return {"status": "ok", "resource": resource}
+
+    if resource == "issue":
+        return await sentry_ingestion_service.process_issue_webhook(payload)
+
+    return {"status": "ignored", "resource": resource or "unknown"}

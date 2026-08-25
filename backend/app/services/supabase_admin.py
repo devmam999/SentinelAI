@@ -115,3 +115,57 @@ async def upsert_sentry_connection(row: dict[str, Any]) -> None:
             json=row,
         )
         resp.raise_for_status()
+
+
+async def list_sentry_connections_by_project_slug(project_slug: str) -> list[dict[str, Any]]:
+    base, key = _require_admin_config()
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{base}/rest/v1/project_sentry_connections",
+            params={"project_slug": f"eq.{project_slug}", "select": "*"},
+            headers=_headers(key),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def get_project(project_id: str) -> dict[str, Any] | None:
+    base, key = _require_admin_config()
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{base}/rest/v1/projects",
+            params={"id": f"eq.{project_id}", "select": "*"},
+            headers=_headers(key),
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+        return rows[0] if rows else None
+
+
+async def sentry_incident_exists(project_id: str, sentry_issue_id: str) -> bool:
+    base, key = _require_admin_config()
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{base}/rest/v1/incidents",
+            params={
+                "project_id": f"eq.{project_id}",
+                "sentry_issue_id": f"eq.{sentry_issue_id}",
+                "select": "id",
+            },
+            headers=_headers(key),
+        )
+        resp.raise_for_status()
+        return bool(resp.json())
+
+
+async def create_sentry_incident(row: dict[str, Any]) -> dict[str, Any]:
+    base, key = _require_admin_config()
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{base}/rest/v1/incidents",
+            headers={**_headers(key), "Prefer": "return=representation"},
+            json=row,
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+        return rows[0] if rows else {}

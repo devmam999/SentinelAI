@@ -44,6 +44,8 @@ export type StoredIncident = {
   runbook_matches: RunbookMatch[] | null
   slack_posted: boolean
   postmortem_posted: boolean
+  source: 'manual' | 'sentry'
+  sentry_issue_id: string | null
   created_by: string | null
   reporter_username?: string | null
   created_at: string
@@ -179,6 +181,7 @@ export type AccessibleProject = {
   runbooks: string | null
   created_at: string
   user_id: string
+  trigger_mode: 'manual' | 'autonomous'
 }
 
 export async function fetchAccessibleProject(projectId: string): Promise<{
@@ -191,9 +194,16 @@ export async function fetchAccessibleProject(projectId: string): Promise<{
   })
 
   if (!rpcError && Array.isArray(rpcRows) && rpcRows.length > 0) {
-    const row = rpcRows[0] as AccessibleProject & { my_role: string }
+    const row = rpcRows[0] as AccessibleProject & { my_role: string; trigger_mode?: string }
     if (row.my_role === 'owner' || row.my_role === 'admin' || row.my_role === 'member') {
-      return { project: row, role: row.my_role as ProjectRole, error: null }
+      return {
+        project: {
+          ...row,
+          trigger_mode: row.trigger_mode === 'autonomous' ? 'autonomous' : 'manual',
+        },
+        role: row.my_role as ProjectRole,
+        error: null,
+      }
     }
   }
 
@@ -208,7 +218,7 @@ export async function fetchAccessibleProject(projectId: string): Promise<{
 
   const { data, error } = await supabase
     .from('projects')
-    .select('id, name, github_repo, slack_webhook, runbooks, created_at, user_id')
+    .select('id, name, github_repo, slack_webhook, runbooks, created_at, user_id, trigger_mode')
     .eq('id', projectId)
     .maybeSingle()
 
@@ -220,7 +230,14 @@ export async function fetchAccessibleProject(projectId: string): Promise<{
 
   if (!verifiedRole) return { project: null, role: null, error: null }
 
-  return { project: data, role: verifiedRole, error: null }
+  return {
+    project: {
+      ...data,
+      trigger_mode: data.trigger_mode === 'autonomous' ? 'autonomous' : 'manual',
+    },
+    role: verifiedRole,
+    error: null,
+  }
 }
 
 type ProjectRow = {
@@ -623,6 +640,8 @@ export async function fetchProjectIncidents(projectId: string): Promise<StoredIn
     reporter_username: row.created_by ? profileNames.get(row.created_by) ?? null : null,
     runbook_matches: (row.runbook_matches as RunbookMatch[] | null) ?? null,
     postmortem_posted: Boolean(row.postmortem_posted),
+    source: row.source === 'sentry' ? 'sentry' : 'manual',
+    sentry_issue_id: row.sentry_issue_id ?? null,
     analysis: (row.analysis as IncidentAnalysis | null) ?? null,
     status: row.status as StoredIncident['status'],
   }))
@@ -659,6 +678,8 @@ export async function createProjectIncident(input: {
       ...data,
       runbook_matches: (data.runbook_matches as RunbookMatch[] | null) ?? null,
       postmortem_posted: Boolean(data.postmortem_posted),
+      source: data.source === 'sentry' ? 'sentry' : 'manual',
+      sentry_issue_id: data.sentry_issue_id ?? null,
       assigned_at: data.assigned_at ?? null,
       created_by: data.created_by ?? null,
       analysis: (data.analysis as IncidentAnalysis | null) ?? null,

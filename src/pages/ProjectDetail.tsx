@@ -24,6 +24,7 @@ import {
   fetchProjectIncidents,
   fetchProjectInvitations,
   fetchAccessibleProject,
+  fetchProjectSentryStatus,
   fetchProjectTeam,
   getMyProjectRole,
   requestIncidentAssignment,
@@ -37,6 +38,7 @@ import {
   type ProjectEditRequest,
   type ProjectInvitation,
   type ProjectRole,
+  type ProjectSentryStatus,
   type StoredIncident,
   type TeamMember,
 } from '../lib/projectTeam'
@@ -49,6 +51,17 @@ type Project = {
   slack_webhook: string | null
   runbooks: string | null
   created_at: string
+  trigger_mode?: 'manual' | 'autonomous' | null
+}
+
+function alertSourceDisplay(
+  triggerMode: Project['trigger_mode'],
+  sentry: ProjectSentryStatus | null,
+): { value: string; good: boolean } {
+  if (triggerMode === 'autonomous') {
+    return { value: 'Autonomous', good: Boolean(sentry?.connected) }
+  }
+  return { value: 'Manual trigger', good: true }
 }
 
 type IncidentWithFix = StoredIncident & {
@@ -76,6 +89,7 @@ export default function ProjectDetail() {
   const { user, profile } = useAuth()
 
   const [project, setProject] = useState<Project | null>(null)
+  const [sentryStatus, setSentryStatus] = useState<ProjectSentryStatus | null>(null)
   const [myRole, setMyRole] = useState<ProjectRole | null>(null)
   const [team, setTeam] = useState<TeamMember[]>([])
   const [invitations, setInvitations] = useState<ProjectInvitation[]>([])
@@ -116,6 +130,10 @@ export default function ProjectDetail() {
       fetchPendingEditRequests(id),
     ])
     if (data) setProject(data)
+    if (id) {
+      const sentry = await fetchProjectSentryStatus(id)
+      setSentryStatus(sentry)
+    }
     setTeam(nextTeam)
     setInvitations(nextInvitations)
     setEditRequests(nextEditRequests)
@@ -235,6 +253,8 @@ export default function ProjectDetail() {
 
       setProject(data)
       setMyRole(verifiedRole)
+      const sentry = await fetchProjectSentryStatus(id!)
+      if (active) setSentryStatus(sentry)
       await Promise.all([reloadTeam(), reloadIncidents()])
       if (active) setLoading(false)
     }
@@ -251,6 +271,10 @@ export default function ProjectDetail() {
     .map((incident) => incident.pendingFix)
     .filter((fix): fix is IncidentFix => Boolean(fix))
   const isHealthy = activeIncidents.length === 0
+  const isAutonomous = project?.trigger_mode === 'autonomous'
+  const alertSource = project
+    ? alertSourceDisplay(project.trigger_mode, sentryStatus)
+    : { value: 'Manual trigger', good: true }
 
   const indexRunbooksBestEffort = async () => {
     if (!project) return
@@ -603,7 +627,7 @@ export default function ProjectDetail() {
                 value={runbookFiles.length > 0 ? `${runbookFiles.length} Uploaded` : 'None uploaded'}
                 good={runbookFiles.length > 0}
               />
-              <StatCard label="Alert Source" value="Manual trigger" good />
+              <StatCard label="Alert Source" value={alertSource.value} good={alertSource.good} />
             </div>
 
             {isOwner && editRequests.length > 0 && (
@@ -767,13 +791,29 @@ export default function ProjectDetail() {
                 an issue, or wait to be assigned by your team lead.
               </p>
             )}
+            {isAutonomous && (
+              <p
+                style={{
+                  fontFamily: 'var(--font-inter)',
+                  fontSize: '0.84rem',
+                  lineHeight: 1.5,
+                  color: 'var(--muted-foreground)',
+                  marginBottom: 14,
+                }}
+              >
+                This project is in autonomous mode. New Sentry issues are analyzed automatically and appear here
+                as active incidents.
+              </p>
+            )}
             {assignmentError && !canReview && <div style={{ ...errorStyle, marginBottom: 12 }}>{assignmentError}</div>}
             <div style={{ marginBottom: 16 }}>
               {activeIncidents.length === 0 ? (
                 <div style={emptyRowStyle}>
-                  {canReportIncidents
+                  {canReportIncidents && !isAutonomous
                     ? 'No active incidents. Describe an alert below to analyze and open one.'
-                    : 'No active incidents right now.'}
+                    : isAutonomous
+                      ? 'No active incidents. SentinelAI will open one when Sentry reports a new issue.'
+                      : 'No active incidents right now.'}
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -796,7 +836,7 @@ export default function ProjectDetail() {
               )}
             </div>
 
-            {canReportIncidents && (
+            {canReportIncidents && !isAutonomous && (
               <>
                 <SectionHeading style={{ marginTop: 8 }}>Report incident</SectionHeading>
                 <p
@@ -1113,6 +1153,24 @@ function ActiveIncidentCard({
             <span style={{ fontFamily: 'var(--font-inter)', fontSize: '0.95rem', fontWeight: 600, color: 'var(--foreground)' }}>
               {incident.title}
             </span>
+            {incident.source === 'sentry' && (
+              <span
+                style={{
+                  fontFamily: 'var(--font-jetbrains)',
+                  fontSize: '0.65rem',
+                  fontWeight: 600,
+                  letterSpacing: '0.05em',
+                  textTransform: 'uppercase',
+                  color: '#6C5FC7',
+                  background: 'rgba(108,95,199,0.12)',
+                  border: '1px solid rgba(108,95,199,0.28)',
+                  borderRadius: 4,
+                  padding: '2px 6px',
+                }}
+              >
+                Sentry
+              </span>
+            )}
           </span>
           {incident.alert_description && (
             <p
